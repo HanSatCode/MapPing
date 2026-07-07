@@ -11,6 +11,7 @@ interface WizardState {
   places: ParsedPlace[];
   dayThemes: DayTheme[];
   notes: string;
+  allowCar: boolean;
 }
 
 interface WizardContextValue extends WizardState {
@@ -22,6 +23,7 @@ interface WizardContextValue extends WizardState {
   setPlaces: (p: ParsedPlace[]) => void;
   setDayThemes: (t: DayTheme[]) => void;
   setNotes: (notes: string) => void;
+  setAllowCar: (v: boolean) => void;
   reset: () => void;
 }
 
@@ -34,6 +36,7 @@ const initialState: WizardState = {
   places: [],
   dayThemes: [],
   notes: "",
+  allowCar: true,
 };
 
 const WizardContext = createContext<WizardContextValue | null>(null);
@@ -52,6 +55,7 @@ export function WizardProvider({ children }: { children: ReactNode }) {
       setPlaces: (places) => setState((s) => ({ ...s, places })),
       setDayThemes: (dayThemes) => setState((s) => ({ ...s, dayThemes })),
       setNotes: (notes) => setState((s) => ({ ...s, notes })),
+      setAllowCar: (allowCar) => setState((s) => ({ ...s, allowCar })),
       reset: () => setState(initialState),
     }),
     [state]

@@ -106,7 +106,7 @@ export default function ThemeSelection() {
   const currentCategory = groupedPlaces.some(([c]) => c === activeCategory) ? activeCategory : groupedPlaces[0]?.[0] ?? null;
   const currentGroup = groupedPlaces.find(([c]) => c === currentCategory)?.[1] ?? [];
 
-  const updateTheme = (dayIndex: number, theme: Category) => {
+  const updateTheme = (dayIndex: number, theme: Category | null) => {
     setDayThemes(dayThemes.map((dt) => (dt.dayIndex === dayIndex ? { ...dt, theme } : dt)));
   };
 
@@ -278,10 +278,11 @@ export default function ThemeSelection() {
           >
             <span style={{ fontWeight: 700 }}>{dt.dayIndex}일차</span>
             <select
-              value={dt.theme}
-              onChange={(e) => updateTheme(dt.dayIndex, e.target.value as Category)}
+              value={dt.theme ?? ""}
+              onChange={(e) => updateTheme(dt.dayIndex, e.target.value === "" ? null : (e.target.value as Category))}
               style={{ padding: "9px 14px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, background: "#fff" }}
             >
+              <option value="">🗓️ 없음 (자유롭게 채우기)</option>
               {CATEGORY_LIST.map((c) => (
                 <option key={c} value={c}>
                   {CATEGORY_ICON[c]} {c}

@@ -92,6 +92,33 @@ export function setPlaceBudget(itinerary: Itinerary, placeId: string, amount: nu
   return overrides;
 }
 
+export function importItineraryFromJSON(json: string): Itinerary {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new Error("올바른 JSON 파일이 아니에요.");
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !Array.isArray((parsed as Itinerary).places) ||
+    !Array.isArray((parsed as Itinerary).itineraryDays)
+  ) {
+    throw new Error("여행 일정 파일 형식이 아니에요.");
+  }
+  const now = new Date().toISOString();
+  const imported: Itinerary = {
+    ...(parsed as Itinerary),
+    id: crypto.randomUUID(),
+    createdAt: now,
+    updatedAt: now,
+    shareId: undefined,
+  };
+  saveItinerary(imported);
+  return imported;
+}
+
 export function listItinerarySummaries(): ItinerarySummary[] {
   return readAll().map((i) => ({
     id: i.id,

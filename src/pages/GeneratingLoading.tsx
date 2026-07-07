@@ -22,7 +22,7 @@ const MAX_AI_PLACE_DISTANCE_KM = 60;
 
 export default function GeneratingLoading() {
   const navigate = useNavigate();
-  const { rawText, places, dayThemes, basecamp, basecampUndecided, days, notes, destination, reset } = useWizard();
+  const { rawText, places, dayThemes, basecamp, basecampUndecided, days, notes, destination, allowCar, reset } = useWizard();
 
   useEffect(() => {
     if (places.length === 0 || dayThemes.length === 0) {
@@ -42,7 +42,8 @@ export default function GeneratingLoading() {
           : places;
 
       const destinationInfo = getDestination(destination);
-      const aiRecommendations = await recommendAiPlaces(destinationInfo.label, placesWithNotes, notes, days);
+      const locationContext = basecamp?.name || basecamp?.address;
+      const aiRecommendations = await recommendAiPlaces(destinationInfo.label, placesWithNotes, notes, days, locationContext);
       if (cancelled) return;
 
       const aiPlaces: ParsedPlace[] = await Promise.all(
@@ -58,7 +59,7 @@ export default function GeneratingLoading() {
             address: geo.address,
             lat: geo.lat,
             lng: geo.lng,
-            priceLevel: details?.priceLevel ?? seededPriceLevel(rec.name),
+            priceLevel: seededPriceLevel(rec.name),
             estimatedCostJPY: rec.estimatedCostJPY,
             category: rec.category,
             mustVisit: false,
@@ -78,7 +79,8 @@ export default function GeneratingLoading() {
         allPlaces,
         dayThemes,
         startPoint,
-        interpretation?.dayCapacity
+        interpretation?.dayCapacity,
+        allowCar
       );
       const excludedIds = new Set(excludedPlaces.map((p) => p.id));
       const includedPlaces = allPlaces.filter((p) => !excludedIds.has(p.id));
@@ -115,6 +117,7 @@ export default function GeneratingLoading() {
         itineraryDays,
         budgetOverrides: [],
         destinationLabel: destinationInfo.label,
+        allowCar,
       };
 
       saveItinerary(itinerary);

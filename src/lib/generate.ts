@@ -86,15 +86,15 @@ export function capDayPlaces(
   return { kept: [...mustVisit, ...rest.slice(0, remainingSlots)], overflow: rest.slice(remainingSlots) };
 }
 
-function transportModeFor(km: number): "walk" | "transit" | "car" {
+function transportModeFor(km: number, allowCar: boolean): "walk" | "transit" | "car" {
   if (km < 1) return "walk";
-  if (km < 8) return "transit";
+  if (km < 8 || !allowCar) return "transit";
   return "car";
 }
 
-export function computeLeg(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+export function computeLeg(from: { lat: number; lng: number }, to: { lat: number; lng: number }, allowCar: boolean = true) {
   const km = haversineKm(from, to);
-  const mode = transportModeFor(km);
+  const mode = transportModeFor(km, allowCar);
 
   let travelCost = 0;
   let travelTimeMin: number;
@@ -118,7 +118,8 @@ export function computeLeg(from: { lat: number; lng: number }, to: { lat: number
 // Basecamp에서 출발해 가장 가까운 곳부터 방문하는 그리디(최근접 이웃) 동선 계산
 export function buildDayRoute(
   places: ParsedPlace[],
-  start: { lat: number; lng: number }
+  start: { lat: number; lng: number },
+  allowCar: boolean = true
 ): PlaceVisit[] {
   const remaining = [...places];
   const visits: PlaceVisit[] = [];
@@ -136,7 +137,7 @@ export function buildDayRoute(
       }
     });
     const next = remaining.splice(nearestIdx, 1)[0];
-    const leg = computeLeg(current, next);
+    const leg = computeLeg(current, next, allowCar);
 
     visits.push({
       placeId: next.id,
@@ -155,25 +156,27 @@ export function buildDayRoute(
 export function computeReturnLeg(
   visits: PlaceVisit[],
   places: ParsedPlace[],
-  start: { lat: number; lng: number }
+  start: { lat: number; lng: number },
+  allowCar: boolean = true
 ): ReturnLeg | null {
   if (visits.length === 0) return null;
   const lastVisit = visits[visits.length - 1];
   const lastPlace = places.find((p) => p.id === lastVisit.placeId);
   if (!lastPlace) return null;
-  return computeLeg(lastPlace, start);
+  return computeLeg(lastPlace, start, allowCar);
 }
 
 // 사용자가 드래그로 순서를 바꿨을 때, 고정된 순서를 그대로 두고 이동시간/비용만 재계산
 export function recomputeVisitsForOrder(
   orderedPlaceIds: string[],
   places: ParsedPlace[],
-  start: { lat: number; lng: number }
+  start: { lat: number; lng: number },
+  allowCar: boolean = true
 ): PlaceVisit[] {
   let current = start;
   return orderedPlaceIds.map((placeId, idx) => {
     const place = places.find((p) => p.id === placeId)!;
-    const leg = computeLeg(current, place);
+    const leg = computeLeg(current, place, allowCar);
     current = place;
     return { placeId, order: idx, ...leg };
   });
@@ -254,7 +257,8 @@ export function buildItineraryDays(
   places: ParsedPlace[],
   dayThemes: DayTheme[],
   basecamp: Basecamp | { lat: number; lng: number },
-  dayCapacity: number = DEFAULT_DAY_CAPACITY
+  dayCapacity: number = DEFAULT_DAY_CAPACITY,
+  allowCar: boolean = true
 ): { itineraryDays: ItineraryDay[]; excludedPlaces: ParsedPlace[] } {
   const distribution = distributePlacesByTheme(places, dayThemes);
   const excludedPlaces: ParsedPlace[] = [];
@@ -264,8 +268,8 @@ export function buildItineraryDays(
     const { kept, overflow } = capDayPlaces(dayPlaces, dayCapacity);
     excludedPlaces.push(...overflow);
 
-    const orderedByRoute = buildDayRoute(kept, basecamp);
-    const returnLeg = computeReturnLeg(orderedByRoute, kept, basecamp);
+    const orderedByRoute = buildDayRoute(kept, basecamp, allowCar);
+    const returnLeg = computeReturnLeg(orderedByRoute, kept, basecamp, allowCar);
     const dailyTransitBudget = computeDailyTransitBudget(orderedByRoute, returnLeg);
     return {
       dayIndex: dt.dayIndex,

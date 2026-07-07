@@ -16,7 +16,7 @@ export interface ParsedPlace {
 
 export interface DayTheme {
   dayIndex: number;
-  theme: Category;
+  theme: Category | null;
 }
 
 export interface PlaceVisit {
@@ -36,7 +36,7 @@ export interface ReturnLeg {
 
 export interface ItineraryDay {
   dayIndex: number;
-  theme: Category;
+  theme: Category | null;
   visits: PlaceVisit[];
   returnLeg: ReturnLeg | null;
   dailyTransitBudget: number;
@@ -75,6 +75,7 @@ export interface Itinerary {
   shareId?: string;
   exchangeRate?: number;
   destinationLabel?: string;
+  allowCar?: boolean;
 }
 
 export interface ItinerarySummary {

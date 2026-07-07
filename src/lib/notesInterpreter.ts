@@ -68,19 +68,25 @@ export async function recommendAiPlaces(
   destinationLabel: string,
   existingPlaces: ParsedPlace[],
   notes: string,
-  days: number
+  days: number,
+  locationContext?: string
 ): Promise<AiRecommendedPlace[]> {
   const existingNames = existingPlaces.map((p) => p.name);
   const maxCount = Math.min(6, Math.max(2, days * 2));
+  const baseLocationLine = locationContext
+    ? `사용자의 숙소/거점 위치: "${locationContext}" (요청사항에 "도보 10분", "근처", "가까운 곳" 같은 거리 조건이 있으면 반드시 이 위치를 기준으로 실제로 가까운 곳을 찾아줘)`
+    : "";
 
   const response = await callGemini(
     `"${destinationLabel}" 여행 일정(총 ${days}일)을 짜는 중입니다.
+${baseLocationLine}
 
 사용자가 이미 넣은 장소 목록: ${JSON.stringify(existingNames)}
 사용자 요청사항: "${notes.trim() || "(없음)"}"
 
 실제로 검색해서, 위 목록에 없는 "${destinationLabel}"의 실제로 평이 좋고 인기 있는 장소를 최대 ${maxCount}곳 추천해줘.
-요청사항이 있다면 그 취향(예: 카페 위주, 아이와 함께 등)에 맞는 곳을 우선해줘. 이미 목록에 있는 곳과 겹치지 않게 해줘.
+요청사항이 있다면 그 취향(예: 카페 위주, 아이와 함께 등)과 거리 조건(가까운 곳, 도보 거리 등)을 우선해줘. 이미 목록에 있는 곳과 겹치지 않게 해줘.
+요청사항을 만족하는 기존 장소가 목록에 없다면, 이 추천으로 그 빈자리를 채운다고 생각해줘.
 
 각 장소는 다음 카테고리 중 하나로 분류해: ${CATEGORIES.join(", ")}
 

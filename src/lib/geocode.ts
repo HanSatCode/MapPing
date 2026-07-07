@@ -101,25 +101,24 @@ async function loadPlacesService(): Promise<google.maps.places.PlacesService | n
 
 export interface PlaceDetails {
   placeId?: string;
-  priceLevel?: 1 | 2 | 3 | 4;
   types?: string[];
 }
 
-// Google Places API(findPlaceFromQuery)로 실제 place_id, price_level, types 조회. 실패 시 null 반환 -> 호출측에서 폴백 처리
+// Google Places API(findPlaceFromQuery)로 실제 place_id, types 조회. 실패 시 null 반환 -> 호출측에서 폴백 처리
 // center를 지정하면 해당 여행지 주변으로 검색을 편향시켜 동명이인/동명장소 오매칭을 줄인다
+// price_level은 일부러 요청하지 않는다: "Atmosphere Data"로 분류되어 월 1,000회 이후 건당 과금되는데,
+// 어차피 priceLevel은 estimatedCostJPY가 없을 때만 쓰는 폴백이라 seededPriceLevel 추정치로 충분하다.
 export async function fetchPlaceDetails(name: string, center = DEFAULT_CENTER): Promise<PlaceDetails | null> {
   const service = await loadPlacesService();
   if (!service) return null;
 
   return new Promise((resolve) => {
     service.findPlaceFromQuery(
-      { query: name, fields: ["place_id", "price_level", "types"], locationBias: { center, radius: 40000 } },
+      { query: name, fields: ["place_id", "types"], locationBias: { center, radius: 40000 } },
       (results, status) => {
         if (status === google.maps.places.PlacesServiceStatus.OK && results && results[0]) {
           const r = results[0];
-          const priceLevel =
-            typeof r.price_level === "number" ? ((Math.min(4, Math.max(1, r.price_level || 1))) as 1 | 2 | 3 | 4) : undefined;
-          resolve({ placeId: r.place_id, priceLevel, types: r.types });
+          resolve({ placeId: r.place_id, types: r.types });
         } else {
           resolve(null);
         }

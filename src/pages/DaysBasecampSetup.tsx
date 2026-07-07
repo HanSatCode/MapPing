@@ -6,10 +6,11 @@ import { useWizard } from "../lib/WizardContext";
 import { geocodePlace, hasMapsKey, MAPS_LIBRARIES, MAPS_SCRIPT_ID } from "../lib/geocode";
 import { WIZARD_STEPS } from "../lib/wizardSteps";
 import { getDestination } from "../lib/destinations";
+import { Toggle } from "../components/Toggle";
 
 export default function DaysBasecampSetup() {
   const navigate = useNavigate();
-  const { destination, days, setDays, basecamp, setBasecamp, basecampUndecided, setBasecampUndecided } = useWizard();
+  const { destination, days, setDays, basecamp, setBasecamp, basecampUndecided, setBasecampUndecided, allowCar, setAllowCar } = useWizard();
   const destinationCenter = getDestination(destination);
   const [basecampName, setBasecampName] = useState(basecamp?.name ?? "");
   const [pickedPlace, setPickedPlace] = useState<{ address?: string; lat: number; lng: number } | null>(
@@ -153,6 +154,14 @@ export default function DaysBasecampSetup() {
           <input type="checkbox" checked={basecampUndecided} onChange={(e) => setBasecampUndecided(e.target.checked)} />
           <span style={{ fontSize: 14 }}>✨ 아직 숙소를 못 정했어요 (최적 위치를 추천해드려요!)</span>
         </label>
+      </div>
+
+      <div className="card" style={{ padding: 24, marginBottom: 28 }}>
+        <Toggle
+          checked={!allowCar}
+          onChange={(v) => setAllowCar(!v)}
+          label="🚗 자동차는 안 타요 (먼 거리도 도보/대중교통으로만 계산해요)"
+        />
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>

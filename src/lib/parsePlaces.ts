@@ -186,7 +186,7 @@ export async function parsePlacesFromText(
         address: geo.address,
         lat: geo.lat,
         lng: geo.lng,
-        priceLevel: details?.priceLevel ?? seededPriceLevel(name),
+        priceLevel: seededPriceLevel(name),
         estimatedCostJPY: estimatedCostJPY ?? findPriceHintForName(text, name) ?? undefined,
         category: categoryFromGoogleTypes(details?.types) ?? guessCategory(name),
         mustVisit: false,

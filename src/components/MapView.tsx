@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
-import { GoogleMap, Marker, Polyline, useJsApiLoader } from "@react-google-maps/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { GoogleMap, InfoWindow, Marker, useJsApiLoader } from "@react-google-maps/api";
 import type { ParsedPlace } from "../types";
 import { MAPS_LIBRARIES, MAPS_SCRIPT_ID } from "../lib/geocode";
 
@@ -9,18 +9,25 @@ export interface MapPin {
   lng: number;
   label: string;
   kind: "place" | "basecamp" | "recommended";
+  googlePlaceId?: string;
+}
+
+// 저장된 place_id(있으면)나 좌표로 구글 지도 상세 페이지 링크를 만든다. API 호출 없이 그냥 URL 조립.
+function googleMapsLink(pin: MapPin): string {
+  return pin.googlePlaceId
+    ? `https://www.google.com/maps/place/?q=place_id:${pin.googlePlaceId}`
+    : `https://www.google.com/maps?q=${pin.lat},${pin.lng}`;
 }
 
 interface MapViewProps {
   pins: MapPin[];
-  routePoints?: { lat: number; lng: number }[];
   height?: number;
   focusId?: string | null;
 }
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
-function SchematicMap({ pins, routePoints, height = 420, focusId }: MapViewProps) {
+function SchematicMap({ pins, height = 420, focusId }: MapViewProps) {
   const bounds = useMemo(() => {
     if (pins.length === 0) return { minLat: 37.5, maxLat: 37.6, minLng: 126.9, maxLng: 127.0 };
     const lats = pins.map((p) => p.lat);
@@ -58,25 +65,17 @@ function SchematicMap({ pins, routePoints, height = 420, focusId }: MapViewProps
       <div style={{ position: "absolute", top: 8, left: 8, fontSize: 11, color: "#666", background: "#fff9", padding: "2px 8px", borderRadius: 6 }}>
         지도 API 키 미설정 · 스키매틱 미리보기
       </div>
-      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0 }}>
-        {routePoints && routePoints.length > 1 && (
-          <polyline
-            points={routePoints.map((p) => { const { x, y } = project(p.lat, p.lng); return `${x},${y}`; }).join(" ")}
-            fill="none"
-            stroke="#1c7ed6"
-            strokeWidth={0.6}
-            strokeDasharray="1.5,1"
-          />
-        )}
-      </svg>
       {pins.map((pin) => {
         const { x, y } = project(pin.lat, pin.lng);
         const focused = pin.id === focusId;
         const size = focused ? (pin.kind === "place" ? 16 : 22) : pin.kind === "place" ? 10 : 16;
         return (
-          <div
+          <a
             key={pin.id}
-            title={pin.label}
+            href={googleMapsLink(pin)}
+            target="_blank"
+            rel="noreferrer"
+            title={`${pin.label} · 구글 지도에서 보기`}
             style={{
               position: "absolute",
               left: `${x}%`,
@@ -86,6 +85,7 @@ function SchematicMap({ pins, routePoints, height = 420, focusId }: MapViewProps
               flexDirection: "column",
               alignItems: "center",
               zIndex: focused ? 2 : 1,
+              cursor: "pointer",
             }}
           >
             <div
@@ -103,20 +103,22 @@ function SchematicMap({ pins, routePoints, height = 420, focusId }: MapViewProps
                 {pin.label}
               </span>
             )}
-          </div>
+          </a>
         );
       })}
     </div>
   );
 }
 
-function RealMap({ pins, routePoints, height = 420, focusId }: MapViewProps) {
+function RealMap({ pins, height = 420, focusId }: MapViewProps) {
   const { isLoaded } = useJsApiLoader({
     googleMapsApiKey: MAPS_KEY as string,
     id: MAPS_SCRIPT_ID,
     libraries: MAPS_LIBRARIES,
   });
   const mapRef = useRef<google.maps.Map | null>(null);
+  const [infoPinId, setInfoPinId] = useState<string | null>(null);
+  const infoPin = pins.find((p) => p.id === infoPinId) ?? null;
 
   const center = useMemo(() => {
     if (pins.length === 0) return { lat: 37.5665, lng: 126.978 };
@@ -152,6 +154,7 @@ function RealMap({ pins, routePoints, height = 420, focusId }: MapViewProps) {
             position={{ lat: pin.lat, lng: pin.lng }}
             label={pin.kind !== "place" ? { text: pin.label, fontSize: "11px" } : undefined}
             zIndex={focused ? 999 : undefined}
+            onClick={() => setInfoPinId(pin.id)}
             icon={
               pin.kind === "place"
                 ? focused
@@ -176,8 +179,15 @@ function RealMap({ pins, routePoints, height = 420, focusId }: MapViewProps) {
           />
         );
       })}
-      {routePoints && routePoints.length > 1 && (
-        <Polyline path={routePoints} options={{ strokeColor: "#1c7ed6", strokeOpacity: 0.8, strokeWeight: 3 }} />
+      {infoPin && (
+        <InfoWindow position={{ lat: infoPin.lat, lng: infoPin.lng }} onCloseClick={() => setInfoPinId(null)}>
+          <div style={{ fontSize: 13, maxWidth: 180 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>{infoPin.label}</div>
+            <a href={googleMapsLink(infoPin)} target="_blank" rel="noreferrer" style={{ color: "#1c7ed6" }}>
+              구글 지도에서 보기 ↗
+            </a>
+          </div>
+        </InfoWindow>
       )}
     </GoogleMap>
   );

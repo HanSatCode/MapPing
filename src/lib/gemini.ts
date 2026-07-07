@@ -2,6 +2,8 @@
 // 여러 곳에서 재사용한다. 브라우저에서 직접 호출하므로 데모/개발 용도로만 사용할 것
 // (프로덕션에서는 백엔드 프록시가 필요).
 const GEMINI_MODEL = "gemini-2.5-flash-lite";
+// flash-lite는 google_search 그라운딩 자체가 자주 503(과부하)이라, 검색이 필요한 호출은 정식 flash로 보낸다.
+const GEMINI_SEARCH_MODEL = "gemini-2.5-flash";
 
 export function hasGeminiKey(): boolean {
   return Boolean(import.meta.env.VITE_GEMINI_API_KEY);
@@ -21,10 +23,12 @@ export async function callGemini(prompt: string, useSearch = false): Promise<str
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) return null;
 
+  const model = useSearch ? GEMINI_SEARCH_MODEL : GEMINI_MODEL;
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },

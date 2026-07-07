@@ -16,9 +16,7 @@ export function LoadingScreen({ message, subMessage, ticks }: LoadingScreenProps
   }, [ticks]);
 
   return (
-    <div className="page-fade" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "70vh", gap: 26 }}>
-      <div className="pastel-loader" />
-
+    <div className="page-fade loading-bg" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", gap: 26 }}>
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 18, fontWeight: 800, color: "var(--text)" }}>
           {message}

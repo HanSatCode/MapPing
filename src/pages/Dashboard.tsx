@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { deleteItinerary, duplicateItinerary, getSession, listItinerarySummaries, logout } from "../lib/storage";
+import { deleteItinerary, duplicateItinerary, getSession, importItineraryFromJSON, listItinerarySummaries, logout } from "../lib/storage";
 import type { ItinerarySummary } from "../types";
 
 function formatJPY(amount: number) {
@@ -20,6 +20,7 @@ export default function Dashboard() {
   const [items, setItems] = useState<ItinerarySummary[]>([]);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = () => setItems(listItinerarySummaries());
 
@@ -65,6 +66,24 @@ export default function Dashboard() {
     setOpenMenuId(null);
   };
 
+  const handleImportClick = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const imported = importItineraryFromJSON(text);
+      refresh();
+      navigate(`/result/${imported.id}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "일정 파일을 불러오지 못했어요.");
+    }
+  };
+
   return (
     <div className="page-fade with-bottom-nav" style={{ maxWidth: 1000, margin: "0 auto", padding: "36px 24px", width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 36 }}>
@@ -80,10 +99,24 @@ export default function Dashboard() {
       <button
         onClick={() => navigate("/new/destination")}
         className="btn btn-primary"
-        style={{ width: "100%", padding: "20px", fontSize: 16, marginBottom: 40, borderRadius: "var(--radius-md)" }}
+        style={{ width: "100%", padding: "20px", fontSize: 16, marginBottom: 12, borderRadius: "var(--radius-md)" }}
       >
         ✨ 새로운 여행계획 생성
       </button>
+      <button
+        onClick={handleImportClick}
+        className="btn btn-ghost"
+        style={{ width: "100%", padding: "14px", fontSize: 14, marginBottom: 40, borderRadius: "var(--radius-md)" }}
+      >
+        📂 JSON 파일로 여행계획 불러오기
+      </button>
+      <input
+        ref={importInputRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={handleImportFile}
+        style={{ display: "none" }}
+      />
 
       <h3 style={{ marginBottom: 16, fontSize: 16 }}>내 일정</h3>
       {items.length === 0 && (

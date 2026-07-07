@@ -26,12 +26,15 @@ import {
   DEFAULT_DAY_START_TIME,
   DEFAULT_DAY_END_TIME_TARGET,
   STAY_MINUTES,
+  CATEGORY_LIST,
 } from "../lib/generate";
 import { geocodePlace, fetchPlaceDetails, hasMapsKey, MAPS_LIBRARIES, MAPS_SCRIPT_ID } from "../lib/geocode";
 import { categoryFromGoogleTypes, guessCategory, seededPriceLevel } from "../lib/parsePlaces";
 import { interpretNotes, recommendAiPlaces } from "../lib/notesInterpreter";
 import { MapView, type MapPin } from "../components/MapView";
-import type { Itinerary, ParsedPlace, PlaceVisit } from "../types";
+import { MarqueeText } from "../components/MarqueeText";
+import { Toggle } from "../components/Toggle";
+import type { Category, Itinerary, ParsedPlace, PlaceVisit } from "../types";
 
 const TRANSPORT_LABEL: Record<string, string> = { walk: "도보", transit: "대중교통", car: "자동차" };
 
@@ -128,6 +131,7 @@ export default function Result() {
 
   const currentDay = itinerary.itineraryDays.find((d) => d.dayIndex === selectedDay);
   const startPoint = itinerary.basecamp ?? itinerary.recommendedCenter ?? computeCentroid(itinerary.places);
+  const allowCar = itinerary.allowCar ?? true;
   const dayTimeline = currentDay
     ? computeDayTimeline(currentDay.visits, itinerary.places, currentDay.returnLeg, currentDay.startTime ?? DEFAULT_DAY_START_TIME)
     : null;
@@ -143,7 +147,7 @@ export default function Result() {
   const refineDay = async (visits: PlaceVisit[], places: ParsedPlace[]) => {
     const refinedVisits = await refineVisitsWithRealTravelTimes(visits, places, startPoint);
     const lastPlace = refinedVisits.length > 0 ? places.find((p) => p.id === refinedVisits[refinedVisits.length - 1].placeId) : undefined;
-    const heuristicReturnLeg = computeReturnLeg(refinedVisits, places, startPoint);
+    const heuristicReturnLeg = computeReturnLeg(refinedVisits, places, startPoint, allowCar);
     const refinedReturnLeg = await refineReturnLegWithRealTravelTime(heuristicReturnLeg, lastPlace, startPoint);
     return { visits: refinedVisits, returnLeg: refinedReturnLeg, dailyTransitBudget: computeDailyTransitBudget(refinedVisits, refinedReturnLeg) };
   };
@@ -155,7 +159,7 @@ export default function Result() {
     const oldIndex = currentDay.visits.findIndex((v) => v.placeId === active.id);
     const newIndex = currentDay.visits.findIndex((v) => v.placeId === over.id);
     const reorderedIds = arrayMove(currentDay.visits, oldIndex, newIndex).map((v) => v.placeId);
-    const heuristicVisits = withPreservedStayMinutes(currentDay.visits, recomputeVisitsForOrder(reorderedIds, itinerary.places, startPoint));
+    const heuristicVisits = withPreservedStayMinutes(currentDay.visits, recomputeVisitsForOrder(reorderedIds, itinerary.places, startPoint, allowCar));
     const refined = await refineDay(heuristicVisits, itinerary.places);
 
     setItinerary((prev) =>
@@ -180,7 +184,7 @@ export default function Result() {
     let refined: Awaited<ReturnType<typeof refineDay>> | null = null;
     if (affectedDay) {
       const orderedIds = affectedDay.visits.filter((v) => v.placeId !== placeId).map((v) => v.placeId);
-      const heuristicVisits = withPreservedStayMinutes(affectedDay.visits, recomputeVisitsForOrder(orderedIds, newPlaces, startPoint));
+      const heuristicVisits = withPreservedStayMinutes(affectedDay.visits, recomputeVisitsForOrder(orderedIds, newPlaces, startPoint, allowCar));
       refined = await refineDay(heuristicVisits, newPlaces);
     }
 
@@ -203,7 +207,7 @@ export default function Result() {
     if (!targetDay) return;
 
     const orderedIds = [...targetDay.visits.map((v) => v.placeId), newPlace.id];
-    const heuristicVisits = withPreservedStayMinutes(targetDay.visits, recomputeVisitsForOrder(orderedIds, newPlaces, startPoint));
+    const heuristicVisits = withPreservedStayMinutes(targetDay.visits, recomputeVisitsForOrder(orderedIds, newPlaces, startPoint, allowCar));
     const refined = await refineDay(heuristicVisits, newPlaces);
 
     setItinerary((prev) =>
@@ -327,6 +331,69 @@ export default function Result() {
     setDirty(true);
   };
 
+  const handleThemeChange = async (dayIndex: number, newTheme: Category | null) => {
+    const newDayThemes = itinerary.dayThemes.map((dt) => (dt.dayIndex === dayIndex ? { ...dt, theme: newTheme } : dt));
+    const allPlaces = [...itinerary.places, ...itinerary.excludedPlaces];
+    const { itineraryDays: builtDays, excludedPlaces } = buildItineraryDays(allPlaces, newDayThemes, startPoint, undefined, allowCar);
+    const excludedIds = new Set(excludedPlaces.map((p) => p.id));
+    const includedPlaces = allPlaces.filter((p) => !excludedIds.has(p.id));
+
+    const itineraryDays = await Promise.all(
+      builtDays.map(async (day) => {
+        const refined = await refineDay(day.visits, includedPlaces);
+        return { ...day, ...refined };
+      })
+    );
+
+    setItinerary({
+      ...itinerary,
+      dayThemes: newDayThemes,
+      places: includedPlaces,
+      excludedPlaces,
+      itineraryDays,
+      budgetOverrides: itinerary.budgetOverrides.filter((o) => includedPlaces.some((p) => p.id === o.placeId)),
+    });
+    setDirty(true);
+  };
+
+  const handleAllowCarChange = async (nextAllowCar: boolean) => {
+    const allPlaces = [...itinerary.places, ...itinerary.excludedPlaces];
+    const { itineraryDays: builtDays, excludedPlaces } = buildItineraryDays(
+      allPlaces,
+      itinerary.dayThemes,
+      startPoint,
+      undefined,
+      nextAllowCar
+    );
+    const excludedIds = new Set(excludedPlaces.map((p) => p.id));
+    const includedPlaces = allPlaces.filter((p) => !excludedIds.has(p.id));
+
+    const itineraryDays = await Promise.all(
+      builtDays.map(async (day) => {
+        const refinedVisits = await refineVisitsWithRealTravelTimes(day.visits, includedPlaces, startPoint);
+        const lastPlace =
+          refinedVisits.length > 0 ? includedPlaces.find((p) => p.id === refinedVisits[refinedVisits.length - 1].placeId) : undefined;
+        const refinedReturnLeg = await refineReturnLegWithRealTravelTime(day.returnLeg, lastPlace, startPoint);
+        return {
+          ...day,
+          visits: refinedVisits,
+          returnLeg: refinedReturnLeg,
+          dailyTransitBudget: computeDailyTransitBudget(refinedVisits, refinedReturnLeg),
+        };
+      })
+    );
+
+    setItinerary({
+      ...itinerary,
+      allowCar: nextAllowCar,
+      places: includedPlaces,
+      excludedPlaces,
+      itineraryDays,
+      budgetOverrides: itinerary.budgetOverrides.filter((o) => includedPlaces.some((p) => p.id === o.placeId)),
+    });
+    setDirty(true);
+  };
+
   const handleExchangeRateChange = (value: string) => {
     setExchangeRateInput(value);
     const rate = Number(value);
@@ -346,7 +413,8 @@ export default function Result() {
           : itinerary.places;
 
       const destinationLabel = itinerary.destinationLabel || itinerary.basecamp?.name || itinerary.basecamp?.address || "여행지";
-      const aiRecommendations = await recommendAiPlaces(destinationLabel, placesWithMustVisit, combinedNotes, itinerary.days);
+      const locationContext = itinerary.basecamp?.name || itinerary.basecamp?.address;
+      const aiRecommendations = await recommendAiPlaces(destinationLabel, placesWithMustVisit, combinedNotes, itinerary.days, locationContext);
 
       if (!interpretation && aiRecommendations.length === 0) {
         alert("AI 재분석에 실패했어요. API 키 설정 또는 사용량 한도를 확인해주세요.\n(요청사항 텍스트는 저장됩니다.)");
@@ -369,7 +437,7 @@ export default function Result() {
             address: geo.address,
             lat: geo.lat,
             lng: geo.lng,
-            priceLevel: details?.priceLevel ?? seededPriceLevel(rec.name),
+            priceLevel: seededPriceLevel(rec.name),
             estimatedCostJPY: rec.estimatedCostJPY,
             category: rec.category,
             mustVisit: false,
@@ -385,7 +453,8 @@ export default function Result() {
         allPlaces,
         itinerary.dayThemes,
         startPoint,
-        interpretation?.dayCapacity
+        interpretation?.dayCapacity,
+        allowCar
       );
       const excludedIds = new Set(excludedPlaces.map((p) => p.id));
       const includedPlaces = allPlaces.filter((p) => !excludedIds.has(p.id));
@@ -422,7 +491,7 @@ export default function Result() {
     const escapeCsvCell = (value: string) =>
       /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 
-    const header = ["시간", ...itinerary.itineraryDays.map((d) => `${d.dayIndex}일차 · ${d.theme}`)];
+    const header = ["시간", ...itinerary.itineraryDays.map((d) => `${d.dayIndex}일차${d.theme ? ` · ${d.theme}` : ""}`)];
 
     const dayTimelines = itinerary.itineraryDays.map((day) =>
       computeDayTimeline(day.visits, itinerary.places, day.returnLeg, day.startTime ?? DEFAULT_DAY_START_TIME)
@@ -456,11 +525,25 @@ export default function Result() {
     URL.revokeObjectURL(url);
   };
 
+  const handleExportJson = () => {
+    const blob = new Blob([JSON.stringify(itinerary, null, 2)], { type: "application/json;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${itinerary.title || "여행일정"}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const totalBudget = computeTotalBudget(itinerary);
   const effectiveExchangeRate = itinerary.exchangeRate ?? DEFAULT_EXCHANGE_RATE;
 
+  const placesForMap =
+    tab === "route" && currentDay
+      ? currentDay.visits.map((v) => placeById.get(v.placeId)).filter((p): p is ParsedPlace => Boolean(p))
+      : itinerary.places;
   const mapPins: MapPin[] = [
-    ...itinerary.places.map((p) => ({ id: p.id, lat: p.lat, lng: p.lng, label: p.name, kind: "place" as const })),
+    ...placesForMap.map((p) => ({ id: p.id, lat: p.lat, lng: p.lng, label: p.name, kind: "place" as const, googlePlaceId: p.googlePlaceId })),
   ];
   if (itinerary.basecamp) {
     mapPins.push({ id: "basecamp", lat: itinerary.basecamp.lat, lng: itinerary.basecamp.lng, label: "숙소", kind: "basecamp" });
@@ -468,9 +551,6 @@ export default function Result() {
     mapPins.push({ id: "recommended", lat: itinerary.recommendedCenter.lat, lng: itinerary.recommendedCenter.lng, label: "추천 중심점", kind: "recommended" });
   }
 
-  const routePoints = currentDay
-    ? [startPoint, ...currentDay.visits.map((v) => placeById.get(v.placeId)!).filter(Boolean), ...(currentDay.returnLeg ? [startPoint] : [])]
-    : [];
 
   return (
     <div className="page-fade with-bottom-nav" style={{ maxWidth: 1180, margin: "0 auto", padding: "24px 24px", width: "100%" }}>
@@ -484,10 +564,14 @@ export default function Result() {
           <div style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 4 }}>
             {itinerary.days}일 여행 · 총 예산 <b style={{ color: "var(--primary-dark)" }}>{formatJPY(totalBudget)}</b>
           </div>
+          <div style={{ marginTop: 10 }}>
+            <Toggle checked={!allowCar} onChange={(v) => handleAllowCarChange(!v)} label="🚗 자동차는 안 타요 (도보/대중교통으로만 계산)" />
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => navigate("/dashboard")} style={secondaryBtn}>대시보드로</button>
           <button onClick={handleExportTimetable} style={secondaryBtn}>시간표 내보내기</button>
+          <button onClick={handleExportJson} style={secondaryBtn}>JSON 내보내기</button>
           <button onClick={handleShare} style={secondaryBtn}>공유</button>
           <button onClick={handleSave} style={primaryBtn}>{dirty ? "변경사항 저장" : "저장됨"}</button>
         </div>
@@ -535,7 +619,7 @@ export default function Result() {
               <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
                 {itinerary.itineraryDays.map((d) => (
                   <button key={d.dayIndex} onClick={() => setSelectedDay(d.dayIndex)} style={dayBtn(d.dayIndex === selectedDay)}>
-                    {d.dayIndex}일차 · {d.theme}
+                    {d.dayIndex}일차{d.theme ? ` · ${d.theme}` : ""}
                   </button>
                 ))}
               </div>
@@ -546,6 +630,19 @@ export default function Result() {
                     이 날 예상 교통비 <b style={{ color: "var(--text)" }}>{formatJPY(currentDay.dailyTransitBudget)}</b>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>
+                      <span>테마</span>
+                      <select
+                        value={currentDay.theme ?? ""}
+                        onChange={(e) => handleThemeChange(currentDay.dayIndex, e.target.value === "" ? null : (e.target.value as Category))}
+                        style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 13, fontWeight: 600 }}
+                      >
+                        <option value="">🗓️ 없음</option>
+                        {CATEGORY_LIST.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>
                       <span>출발 시간</span>
                       <input
@@ -699,10 +796,10 @@ export default function Result() {
               <h4 style={{ marginBottom: 12, fontSize: 15 }}>장소별 예상 금액</h4>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {itinerary.places.map((place) => (
-                  <div key={place.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
-                    <div>
+                  <div key={place.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", gap: 12 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <div style={{ fontWeight: 700 }}>{place.name}</div>
+                        <MarqueeText text={place.name} style={{ fontWeight: 700 }} />
                         {place.aiRecommended && <AiBadge />}
                       </div>
                       <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{place.category}</div>
@@ -734,7 +831,7 @@ export default function Result() {
         </div>
 
         <div>
-          <MapView pins={mapPins} routePoints={tab === "route" ? routePoints : undefined} height={520} focusId={focusedPlaceId} />
+          <MapView pins={mapPins} height={520} focusId={focusedPlaceId} />
         </div>
       </div>
 
@@ -840,12 +937,12 @@ export default function Result() {
                           textAlign: "left",
                         }}
                       >
-                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <b>{place.name}</b>
-                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{place.category}</span>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+                          <MarqueeText text={place.name} style={{ fontWeight: 700 }} />
+                          <span style={{ color: "var(--text-muted)", fontSize: 12, flexShrink: 0 }}>{place.category}</span>
                           {place.aiRecommended && <AiBadge />}
                         </span>
-                        <span style={{ color: "var(--primary)", fontWeight: 700, fontSize: 13 }}>+ 추가</span>
+                        <span style={{ color: "var(--primary)", fontWeight: 700, fontSize: 13, flexShrink: 0, marginLeft: 8 }}>+ 추가</span>
                       </button>
                     ))}
                 </div>
@@ -977,10 +1074,10 @@ function SortableVisitRow({
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <div style={{ fontWeight: 700 }}>{place.name}</div>
+          <MarqueeText text={place.name} style={{ fontWeight: 700 }} />
           {place.aiRecommended && <AiBadge />}
           {arrival && departure && (
-            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--primary-dark)", background: "var(--primary-light)", padding: "1px 8px", borderRadius: 999 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--primary-dark)", background: "var(--primary-light)", padding: "1px 8px", borderRadius: 999, flexShrink: 0 }}>
               {arrival} - {departure}
             </span>
           )}
