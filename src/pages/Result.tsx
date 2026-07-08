@@ -183,18 +183,21 @@ export default function Result() {
   useEffect(() => {
     if (tab !== "curation" || !itinerary) return;
     const day = itinerary.itineraryDays.find((d) => d.dayIndex === selectedDay);
-    if (!day || day.visits.length === 0 || curationByDay[selectedDay] !== undefined) return;
-
+    if (!day || curationByDay[selectedDay] !== undefined) return;
+    // 이미 JSON에 저장된 큐레이션이 있으면 그걸 그대로 쓰고, AI는 다시 부르지 않는다.
     if (day.curation) {
       setCurationByDay((prev) => ({ ...prev, [selectedDay]: day.curation! }));
-      return;
     }
+  }, [tab, selectedDay, itinerary]);
 
-    let cancelled = false;
+  const handleGenerateCuration = () => {
+    if (!itinerary) return;
+    const day = itinerary.itineraryDays.find((d) => d.dayIndex === selectedDay);
+    if (!day || day.visits.length === 0) return;
+
     setCurationLoadingDay(selectedDay);
     const placesMap = new Map(itinerary.places.map((p) => [p.id, p]));
     Promise.all([generateDayCuration(itinerary.destinationLabel || "여행지", day, placesMap, itinerary.notes, itinerary.days), demoDelay()]).then(([text]) => {
-      if (cancelled) return;
       setCurationByDay((prev) => ({ ...prev, [selectedDay]: text }));
       setCurationLoadingDay(null);
       if (!text) return;
@@ -208,10 +211,7 @@ export default function Result() {
         return updated;
       });
     });
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, selectedDay, itinerary]);
+  };
 
   if (!itinerary) return null;
 
@@ -338,19 +338,25 @@ export default function Result() {
     const name = newPlaceName.trim();
     if (!name) return;
     setAdding(true);
-    const geo = await geocodePlace(name, startPoint);
-    addPlaceToDay({
-      id: crypto.randomUUID(),
-      name,
-      address: geo.address,
-      lat: geo.lat,
-      lng: geo.lng,
-      priceLevel: seededPriceLevel(name),
-      category: guessCategory(name),
-      mustVisit: false,
-    });
-    setNewPlaceName("");
-    setAdding(false);
+    try {
+      const geo = await geocodePlace(name, startPoint);
+      await addPlaceToDay({
+        id: crypto.randomUUID(),
+        name,
+        address: geo.address,
+        lat: geo.lat,
+        lng: geo.lng,
+        priceLevel: seededPriceLevel(name),
+        category: guessCategory(name),
+        mustVisit: false,
+      });
+      setNewPlaceName("");
+    } catch (err) {
+      console.warn("장소 추가 실패", err);
+      alert("장소를 추가하지 못했어요. 다시 시도해주세요.");
+    } finally {
+      setAdding(false);
+    }
   };
 
   const handleAddFromExcluded = (place: ParsedPlace) => {
@@ -680,13 +686,15 @@ export default function Result() {
       const row = [`${String(hour).padStart(2, "0")}:00`];
       itinerary.itineraryDays.forEach((_day, dayIdx) => {
         const timeline = dayTimelines[dayIdx];
-        const stop = timeline.stops.find((s) => {
+        const overlappingStops = timeline.stops.filter((s) => {
           const arrivalMin = timeToMinutes(s.arrival);
           const departureMin = timeToMinutes(s.departure);
           return arrivalMin < rangeEnd && departureMin > rangeStart;
         });
-        const place = stop ? placeById.get(stop.placeId) : undefined;
-        row.push(place?.name ?? "");
+        const names = overlappingStops
+          .map((s) => placeById.get(s.placeId)?.name)
+          .filter((name): name is string => Boolean(name));
+        row.push(names.join(" / "));
       });
       rows.push(row);
     }
@@ -962,6 +970,17 @@ export default function Result() {
                   <div style={{ whiteSpace: "pre-line", fontSize: 14, lineHeight: 1.7, color: "var(--text)" }}>
                     {curationByDay[selectedDay]}
                   </div>
+                </div>
+              )}
+
+              {currentDay && currentDay.visits.length > 0 && curationLoadingDay !== selectedDay && !curationByDay[selectedDay] && (
+                <div className="card" style={{ padding: "20px 22px", textAlign: "center" }}>
+                  <p style={{ margin: "0 0 14px", color: "var(--text-muted)", fontSize: 14 }}>
+                    이 날의 큐레이션이 아직 없어요.
+                  </p>
+                  <button className="btn btn-primary" onClick={handleGenerateCuration}>
+                    ✨ 큐레이션 생성
+                  </button>
                 </div>
               )}
             </div>
@@ -1254,6 +1273,16 @@ export default function Result() {
         </div>,
         document.body
       )}
+
+      {reanalyzing &&
+        createPortal(
+          <LoadingScreen
+            message={"AI가 요청사항을 반영해\n일정을 다시 짜고 있어요"}
+            subMessage="동선/장소를 다시 계산하는 중이에요"
+            ticks={["우선순위를 확인하고 있어요", "어울리는 장소를 찾고 있어요", "동선을 다시 계산하고 있어요"]}
+          />,
+          document.body
+        )}
 
       {showExportModal && createPortal(
         <div

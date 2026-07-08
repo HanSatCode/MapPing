@@ -14,6 +14,9 @@ import {
   refineVisitsWithRealTravelTimes,
   refineReturnLegWithRealTravelTime,
   maxWalkMinutesToKm,
+  trimDayToTimeBudget,
+  DEFAULT_DAY_START_TIME,
+  DEFAULT_DAY_END_TIME_TARGET,
 } from "../lib/generate";
 import { interpretNotes, recommendAiPlaces } from "../lib/notesInterpreter";
 import { applyDayAreaConstraints, applyDayPlaceRequests } from "../lib/areaConstraint";
@@ -116,20 +119,26 @@ export default function ThemeSelection() {
     const name = newPlaceName.trim();
     if (!name) return;
     setAdding(true);
-    const geo = await geocodePlace(name, destinationCenter);
-    const newPlace: ParsedPlace = {
-      id: crypto.randomUUID(),
-      name,
-      address: geo.address,
-      lat: geo.lat,
-      lng: geo.lng,
-      priceLevel: seededPriceLevel(name),
-      category: guessCategory(name),
-      mustVisit: false,
-    };
-    setPlaces([...places, newPlace]);
-    setNewPlaceName("");
-    setAdding(false);
+    try {
+      const geo = await geocodePlace(name, destinationCenter);
+      const newPlace: ParsedPlace = {
+        id: crypto.randomUUID(),
+        name,
+        address: geo.address,
+        lat: geo.lat,
+        lng: geo.lng,
+        priceLevel: seededPriceLevel(name),
+        category: guessCategory(name),
+        mustVisit: false,
+      };
+      setPlaces([...places, newPlace]);
+      setNewPlaceName("");
+    } catch (err) {
+      console.warn("장소 추가 실패", err);
+      alert("장소를 추가하지 못했어요. 다시 시도해주세요.");
+    } finally {
+      setAdding(false);
+    }
   };
 
   useEffect(() => {
@@ -157,7 +166,16 @@ export default function ThemeSelection() {
     if (dayThemes.length === 0 || places.length === 0) return;
 
     setGenerating(true);
+    try {
+      await runGenerate();
+    } catch (err) {
+      console.warn("일정 생성 실패", err);
+      alert("일정을 생성하지 못했어요. 잠시 후 다시 시도해주세요.");
+      setGenerating(false);
+    }
+  };
 
+  const runGenerate = async () => {
     const includedInputPlaces = places.filter((p) => !p.excluded);
     const [interpretation] = await Promise.all([interpretNotes(notes, includedInputPlaces, days), demoDelay()]);
 
@@ -215,6 +233,28 @@ export default function ThemeSelection() {
         const refinedVisits = await refineVisitsWithRealTravelTimes(day.visits, includedPlaces, startPoint);
         const lastPlace = refinedVisits.length > 0 ? includedPlaces.find((p) => p.id === refinedVisits[refinedVisits.length - 1].placeId) : undefined;
         const refinedReturnLeg = await refineReturnLegWithRealTravelTime(day.returnLeg, lastPlace, startPoint);
+
+        // 페이스를 명시적으로 요청하지 않은 날은 개수가 아니라 귀가 목표 시각으로 채워지는데,
+        // 실제 이동시간으로 보정하고 나면 목표 시각을 넘길 수 있어 여기서 한 번 더 다듬는다.
+        if (interpretation?.dayCapacity == null) {
+          const trimmedResult = await trimDayToTimeBudget(
+            refinedVisits,
+            includedPlaces,
+            startPoint,
+            refinedReturnLeg,
+            allowCar,
+            interpretation?.maxWalkMinutes ? maxWalkMinutesToKm(interpretation.maxWalkMinutes) : undefined,
+            day.startTime ?? DEFAULT_DAY_START_TIME,
+            day.endTimeTarget ?? DEFAULT_DAY_END_TIME_TARGET
+          );
+          return {
+            ...day,
+            visits: trimmedResult.visits,
+            returnLeg: trimmedResult.returnLeg,
+            dailyTransitBudget: computeDailyTransitBudget(trimmedResult.visits, trimmedResult.returnLeg),
+          };
+        }
+
         return {
           ...day,
           visits: refinedVisits,

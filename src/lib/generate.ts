@@ -171,6 +171,72 @@ export function buildDayRoute(
   return visits;
 }
 
+// 하루 방문지 개수를 고정하지 않고, 귀가 목표 시각까지 여유가 있는 한 가까운 곳부터 계속 채운다.
+// '꼭 가고 싶어요' 장소는 시간이 빠듯해도 항상 포함하고, 그 외 장소는 넣었을 때 예상 귀가 시각이
+// 목표 시각을 넘기면 그 시점부터 나머지를 overflow로 돌린다.
+export function buildDayRouteWithinTimeBudget(
+  places: ParsedPlace[],
+  start: { lat: number; lng: number },
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM,
+  startTime: string = DEFAULT_DAY_START_TIME,
+  endTimeTarget: string = DEFAULT_DAY_END_TIME_TARGET
+): { visits: PlaceVisit[]; overflow: ParsedPlace[] } {
+  const mustVisit = places.filter((p) => p.mustVisit);
+  const optional = places.filter((p) => !p.mustVisit);
+
+  const visits: PlaceVisit[] = [];
+  let current = start;
+  let cursor = timeToMinutes(startTime);
+  const targetMinutes = timeToMinutes(endTimeTarget);
+  let order = 0;
+
+  const remainingMustVisit = [...mustVisit];
+  while (remainingMustVisit.length > 0) {
+    let nearestIdx = 0;
+    let nearestDist = Infinity;
+    remainingMustVisit.forEach((p, idx) => {
+      const d = haversineKm(current, p);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestIdx = idx;
+      }
+    });
+    const next = remainingMustVisit.splice(nearestIdx, 1)[0];
+    const leg = computeLeg(current, next, allowCar, maxWalkKm);
+    cursor += leg.travelTimeMin + STAY_MINUTES[next.category];
+    visits.push({ placeId: next.id, order: order++, transportMode: leg.transportMode, travelTimeMin: leg.travelTimeMin, travelCost: leg.travelCost });
+    current = next;
+  }
+
+  const remainingOptional = [...optional];
+  while (remainingOptional.length > 0) {
+    let nearestIdx = 0;
+    let nearestDist = Infinity;
+    remainingOptional.forEach((p, idx) => {
+      const d = haversineKm(current, p);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestIdx = idx;
+      }
+    });
+    const next = remainingOptional[nearestIdx];
+    const leg = computeLeg(current, next, allowCar, maxWalkKm);
+    const stayMinutes = STAY_MINUTES[next.category];
+    const returnLeg = computeLeg(next, start, allowCar, maxWalkKm);
+    const projectedEnd = cursor + leg.travelTimeMin + stayMinutes + returnLeg.travelTimeMin;
+
+    if (projectedEnd > targetMinutes) break;
+
+    remainingOptional.splice(nearestIdx, 1);
+    cursor += leg.travelTimeMin + stayMinutes;
+    visits.push({ placeId: next.id, order: order++, transportMode: leg.transportMode, travelTimeMin: leg.travelTimeMin, travelCost: leg.travelCost });
+    current = next;
+  }
+
+  return { visits, overflow: remainingOptional };
+}
+
 // 그 날의 마지막 방문지에서 숙소(또는 중심점)로 복귀하는 구간 계산
 export function computeReturnLeg(
   visits: PlaceVisit[],
@@ -278,7 +344,7 @@ export function buildItineraryDays(
   places: ParsedPlace[],
   dayThemes: DayTheme[],
   basecamp: Basecamp | { lat: number; lng: number },
-  dayCapacity: number = DEFAULT_DAY_CAPACITY,
+  dayCapacity?: number,
   allowCar: boolean = true,
   maxWalkKm: number = DEFAULT_MAX_WALK_KM
 ): { itineraryDays: ItineraryDay[]; excludedPlaces: ParsedPlace[] } {
@@ -287,10 +353,30 @@ export function buildItineraryDays(
 
   const itineraryDays = dayThemes.map((dt) => {
     const dayPlaces = distribution.get(dt.dayIndex) ?? [];
-    const { kept, overflow } = capDayPlaces(dayPlaces, dayCapacity);
-    excludedPlaces.push(...overflow);
 
-    const orderedByRoute = buildDayRoute(kept, basecamp, allowCar, maxWalkKm);
+    // 사용자가 페이스(방문 개수)를 명시적으로 요청한 경우에는 그 개수를 그대로 존중한다.
+    // 명시하지 않았다면 개수를 고정하지 않고, 귀가 목표 시각까지 여유가 있는 만큼 계속 채운다.
+    let orderedByRoute: PlaceVisit[];
+    let kept: ParsedPlace[];
+    if (dayCapacity != null) {
+      const capped = capDayPlaces(dayPlaces, dayCapacity);
+      kept = capped.kept;
+      excludedPlaces.push(...capped.overflow);
+      orderedByRoute = buildDayRoute(kept, basecamp, allowCar, maxWalkKm);
+    } else {
+      const filled = buildDayRouteWithinTimeBudget(
+        dayPlaces,
+        basecamp,
+        allowCar,
+        maxWalkKm,
+        DEFAULT_DAY_START_TIME,
+        DEFAULT_DAY_END_TIME_TARGET
+      );
+      kept = dayPlaces.filter((p) => filled.visits.some((v) => v.placeId === p.id));
+      excludedPlaces.push(...filled.overflow);
+      orderedByRoute = filled.visits;
+    }
+
     const returnLeg = computeReturnLeg(orderedByRoute, kept, basecamp, allowCar, maxWalkKm);
     const dailyTransitBudget = computeDailyTransitBudget(orderedByRoute, returnLeg);
     return {
@@ -305,6 +391,46 @@ export function buildItineraryDays(
   });
 
   return { itineraryDays, excludedPlaces };
+}
+
+// buildDayRouteWithinTimeBudget은 직선거리 기반 추정 이동시간으로 예산 안에 들어오는지 판단하는데,
+// 실제 구글 API 이동시간(refineVisitsWithRealTravelTimes)으로 보정하면 더 늘어나 귀가 목표를 넘기는 경우가 있다.
+// 이 함수는 실제 이동시간으로 보정된 뒤 실제 종료 시각을 기준으로, 목표 시각을 넘기면 뒤쪽(= '꼭 가고 싶어요'가
+// 아닌) 방문지부터 하나씩 빼서 실제로 목표 시각 안에 들어오도록 다듬는다.
+export async function trimDayToTimeBudget(
+  visits: PlaceVisit[],
+  places: ParsedPlace[],
+  start: { lat: number; lng: number },
+  returnLeg: ReturnLeg | null,
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM,
+  startTime: string = DEFAULT_DAY_START_TIME,
+  endTimeTarget: string = DEFAULT_DAY_END_TIME_TARGET
+): Promise<{ visits: PlaceVisit[]; returnLeg: ReturnLeg | null; dropped: ParsedPlace[] }> {
+  const placesById = new Map(places.map((p) => [p.id, p]));
+  const trimmed = [...visits];
+  const dropped: ParsedPlace[] = [];
+  let currentReturnLeg = returnLeg;
+  const targetMinutes = timeToMinutes(endTimeTarget);
+
+  while (trimmed.length > 0) {
+    const timeline = computeDayTimeline(trimmed, places, currentReturnLeg, startTime);
+    if (timeline.endMinutes <= targetMinutes) break;
+
+    const last = trimmed[trimmed.length - 1];
+    const lastPlace = placesById.get(last.placeId);
+    if (lastPlace?.mustVisit) break; // 더 줄이면 '꼭 가고 싶어요' 장소가 빠지므로 여기서 멈춘다.
+
+    trimmed.pop();
+    if (lastPlace) dropped.push(lastPlace);
+
+    const newLastVisit = trimmed[trimmed.length - 1];
+    const newLastPlace = newLastVisit ? placesById.get(newLastVisit.placeId) : undefined;
+    const heuristicReturn = computeReturnLeg(trimmed, places, start, allowCar, maxWalkKm);
+    currentReturnLeg = await refineReturnLegWithRealTravelTime(heuristicReturn, newLastPlace, start);
+  }
+
+  return { visits: trimmed, returnLeg: currentReturnLeg, dropped };
 }
 
 export function findPlaceById(places: ParsedPlace[], id: string): ParsedPlace | undefined {

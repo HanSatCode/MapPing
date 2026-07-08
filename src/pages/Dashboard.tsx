@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { deleteItinerary, duplicateItinerary, getSession, importItineraryFromJSON, listItinerarySummaries, logout } from "../lib/storage";
+import { deleteItinerary, duplicateItinerary, getSession, importItineraryFromJSON, listItinerarySummaries } from "../lib/storage";
 import type { ItinerarySummary } from "../types";
 
 function formatJPY(amount: number) {
@@ -39,11 +39,6 @@ export default function Dashboard() {
     document.addEventListener("click", onClickOutside);
     return () => document.removeEventListener("click", onClickOutside);
   }, []);
-
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
-  };
 
   const handleDelete = (id: string) => {
     if (confirm("이 일정을 삭제할까요?")) {
@@ -91,9 +86,6 @@ export default function Dashboard() {
           <div style={{ fontSize: 13, color: "var(--text-muted)" }}>안녕하세요 👋</div>
           <div style={{ fontSize: 20, fontWeight: 800 }}>{session?.nickname ?? "여행자"}님</div>
         </div>
-        <button onClick={handleLogout} className="btn btn-ghost" style={{ padding: "8px 14px" }}>
-          로그아웃
-        </button>
       </div>
 
       <button
@@ -158,7 +150,6 @@ export default function Dashboard() {
                 className="card"
                 style={{ position: "absolute", top: 46, right: 10, overflow: "hidden", zIndex: 10, boxShadow: "var(--shadow-lg)" }}
               >
-                <MenuItem label="수정" onClick={() => navigate(`/result/${item.id}`)} />
                 <MenuItem label="복제" onClick={() => handleDuplicate(item.id)} />
                 <MenuItem label="공유" onClick={() => handleShare(item.id)} />
                 <MenuItem label="삭제" onClick={() => handleDelete(item.id)} danger />

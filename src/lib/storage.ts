@@ -9,13 +9,34 @@ export interface Session {
   email: string;
 }
 
+// localStorage 값이 손상돼 있거나(수동 편집, 이전 스키마 등) 저장 공간이 꽉 찬 경우
+// JSON.parse/setItem이 예외를 던지는데, 이걸 그대로 두면 앱 전체가 빈 화면으로 죽어버린다.
+function safeParse<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    console.warn("저장된 데이터를 읽지 못했어요. 기본값으로 대체합니다.");
+    return fallback;
+  }
+}
+
+function safeSetItem(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (err) {
+    console.warn("저장 공간이 부족하거나 저장에 실패했어요.", err);
+    return false;
+  }
+}
+
 export function getSession(): Session | null {
-  const raw = localStorage.getItem(SESSION_KEY);
-  return raw ? JSON.parse(raw) : null;
+  return safeParse(localStorage.getItem(SESSION_KEY), null);
 }
 
 export function login(session: Session) {
-  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  safeSetItem(SESSION_KEY, JSON.stringify(session));
 }
 
 export function logout() {
@@ -23,12 +44,11 @@ export function logout() {
 }
 
 function readAll(): Itinerary[] {
-  const raw = localStorage.getItem(ITINERARIES_KEY);
-  return raw ? JSON.parse(raw) : [];
+  return safeParse(localStorage.getItem(ITINERARIES_KEY), []);
 }
 
-function writeAll(items: Itinerary[]) {
-  localStorage.setItem(ITINERARIES_KEY, JSON.stringify(items));
+function writeAll(items: Itinerary[]): boolean {
+  return safeSetItem(ITINERARIES_KEY, JSON.stringify(items));
 }
 
 export function saveItinerary(itinerary: Itinerary) {
@@ -37,7 +57,8 @@ export function saveItinerary(itinerary: Itinerary) {
   itinerary.updatedAt = new Date().toISOString();
   if (idx >= 0) all[idx] = itinerary;
   else all.unshift(itinerary);
-  writeAll(all);
+  const ok = writeAll(all);
+  if (!ok) alert("저장 공간이 부족해서 일정을 저장하지 못했어요. 불필요한 일정을 삭제한 뒤 다시 시도해주세요.");
 }
 
 export function getItinerary(id: string): Itinerary | null {
