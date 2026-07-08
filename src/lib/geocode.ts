@@ -1,6 +1,8 @@
+import { isDemoMode } from "./demoMode";
+
 const DEFAULT_CENTER = { lat: 37.5665, lng: 126.978 }; // 서울 시청
 
-export const hasMapsKey = Boolean(import.meta.env.VITE_GOOGLE_MAPS_API_KEY);
+export const hasMapsKey = !isDemoMode() && Boolean(import.meta.env.VITE_GOOGLE_MAPS_API_KEY);
 
 // @react-google-maps/api의 Loader는 앱 전체에서 동일한 id로는 동일한 options만 허용하므로
 // 지도/자동완성을 쓰는 모든 곳에서 이 상수를 공유해야 한다.

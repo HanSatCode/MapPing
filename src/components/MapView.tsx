@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { GoogleMap, InfoWindow, Marker, useJsApiLoader } from "@react-google-maps/api";
 import type { ParsedPlace } from "../types";
 import { MAPS_LIBRARIES, MAPS_SCRIPT_ID } from "../lib/geocode";
+import { isDemoMode } from "../lib/demoMode";
 
 export interface MapPin {
   id: string;
@@ -12,11 +13,14 @@ export interface MapPin {
   googlePlaceId?: string;
 }
 
-// 저장된 place_id(있으면)나 좌표로 구글 지도 상세 페이지 링크를 만든다. API 호출 없이 그냥 URL 조립.
+// 좌표로 구글 지도 링크를 만든다 (API 호출 없이 URL 조립).
+// place_id는 이름만으로 별도 검색해서 얻은 값이라 좌표와 다른 장소를 가리킬 수 있으므로,
+// 우리 지도에 찍힌 실제 좌표(query)를 기준으로 하고 place_id는 부가 정보(query_place_id)로만 곁들인다.
 function googleMapsLink(pin: MapPin): string {
+  const query = `${pin.lat},${pin.lng}`;
   return pin.googlePlaceId
-    ? `https://www.google.com/maps/place/?q=place_id:${pin.googlePlaceId}`
-    : `https://www.google.com/maps?q=${pin.lat},${pin.lng}`;
+    ? `https://www.google.com/maps/search/?api=1&query=${query}&query_place_id=${pin.googlePlaceId}`
+    : `https://www.google.com/maps/search/?api=1&query=${query}`;
 }
 
 interface MapViewProps {
@@ -25,7 +29,7 @@ interface MapViewProps {
   focusId?: string | null;
 }
 
-const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+const MAPS_KEY = isDemoMode() ? undefined : import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
 function SchematicMap({ pins, height = 420, focusId }: MapViewProps) {
   const bounds = useMemo(() => {

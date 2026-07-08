@@ -132,8 +132,9 @@ interface LlmPlace {
   estimatedCostJPY?: number;
 }
 
-// LLM에게 장소 추출 + (가격 정보가 텍스트에 없는 경우) 웹 검색으로 실제 예상 비용까지 함께 요청.
-// 검색 그라운딩을 지원하지 않는 환경이면 그냥 무시되고 텍스트 추출만 동작한다.
+// LLM에게 장소 추출 + 예상 비용 추정을 함께 요청.
+// 가격은 텍스트에 이미 적힌 값이 있으면 그걸 쓰고, 없으면 업종 평균으로 추정한다
+// (웹 검색 그라운딩은 끔 — 장소가 많을 때 검색 때문에 응답이 크게 느려지는 걸 피하기 위함).
 async function llmExtractPlaces(text: string): Promise<LlmPlace[] | null> {
   const response = await callGemini(
     `다음은 구글 지도에서 복사한 저장 장소 목록 텍스트입니다. 장소마다 보통 "장소명 / 평점(리뷰수) / 가격대(¥ 또는 ₩ 표시) / · 카테고리 / (선택) 메모나 주소" 순서로 여러 줄에 걸쳐 있고, 장소 사이는 빈 줄로 구분되어 있습니다.
@@ -142,14 +143,12 @@ async function llmExtractPlaces(text: string): Promise<LlmPlace[] | null> {
 
 각 장소마다 1인 기준 예상 비용을 엔화(JPY)로 추정해서 함께 넣어줘:
 - 텍스트에 이미 가격대(¥ 또는 ₩)가 적혀있으면 그 값을 엔화로 환산해서 사용
-- 가격 정보가 없으면 검색해서 해당 장소(또는 비슷한 업종)의 실제 가격대를 찾아 추정
-- 그래도 찾을 수 없으면 업종 평균으로 합리적으로 추정 (숙소/관광지는 입장료나 1박 기준, 식당/카페는 1인 식사 기준)
+- 가격 정보가 없으면 장소명/업종으로 미루어 합리적인 업종 평균으로 추정 (숙소/관광지는 입장료나 1박 기준, 식당/카페는 1인 식사 기준)
 
 마지막 응답은 다른 설명 없이 아래 형식의 JSON 배열만 출력해:
 [{"name": "장소명", "estimatedCostJPY": 1500}, ...]
 
-${text}`,
-    true
+${text}`
   );
   if (!response) return null;
   try {
@@ -168,13 +167,24 @@ ${text}`,
   }
 }
 
+export interface ParsePlacesProgress {
+  phase: "extracting" | "resolving";
+  done: number;
+  total: number;
+}
+
 export async function parsePlacesFromText(
   text: string,
-  center: { lat: number; lng: number }
+  center: { lat: number; lng: number },
+  onProgress?: (progress: ParsePlacesProgress) => void
 ): Promise<ParsedPlace[]> {
+  onProgress?.({ phase: "extracting", done: 0, total: 0 });
   const llmPlaces = await llmExtractPlaces(text);
   const entries: LlmPlace[] =
     llmPlaces && llmPlaces.length > 0 ? llmPlaces : extractNamesRuleBased(text).map((name) => ({ name }));
+
+  let resolved = 0;
+  onProgress?.({ phase: "resolving", done: 0, total: entries.length });
 
   const places = await Promise.all(
     entries.map(async ({ name, estimatedCostJPY }) => {
@@ -191,6 +201,8 @@ export async function parsePlacesFromText(
         category: categoryFromGoogleTypes(details?.types) ?? guessCategory(name),
         mustVisit: false,
       };
+      resolved++;
+      onProgress?.({ phase: "resolving", done: resolved, total: entries.length });
       return place;
     })
   );

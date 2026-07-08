@@ -1,7 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { login } from "../lib/storage";
-import { useEffect, useRef, useState } from "react";
-import { hasGoogleAuth, renderGoogleSignInButton } from "../lib/googleAuth";
+import { useState } from "react";
 
 const ONBOARDING = [
   { icon: "📝", title: "텍스트 분석", desc: "구글 지도에서 복사한 장소 목록만 붙여넣으면 자동으로 장소를 인식해요." },
@@ -13,17 +12,8 @@ const ONBOARDING = [
 export default function Login() {
   const navigate = useNavigate();
   const [slide, setSlide] = useState(0);
-  const googleBtnRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    if (!hasGoogleAuth || !googleBtnRef.current) return;
-    renderGoogleSignInButton(googleBtnRef.current, (profile) => {
-      login({ nickname: profile.name, email: profile.email });
-      navigate("/dashboard");
-    });
-  }, []);
-
-  const handleMockLogin = () => {
+  const handleStart = () => {
     login({ nickname: "여행자", email: "traveler@example.com" });
     navigate("/dashboard");
   };
@@ -75,26 +65,9 @@ export default function Login() {
           </div>
         </div>
 
-        {hasGoogleAuth ? (
-          <div ref={googleBtnRef} style={{ display: "flex", justifyContent: "center" }} />
-        ) : (
-          <button
-            onClick={handleMockLogin}
-            className="btn btn-secondary"
-            style={{ width: "100%", padding: "14px 20px", fontSize: 15 }}
-          >
-            <span
-              style={{
-                fontSize: 14,
-                fontWeight: 800,
-                color: "#4285F4",
-              }}
-            >
-              G
-            </span>
-            Google 계정으로 계속하기 (데모 모드)
-          </button>
-        )}
+        <button onClick={handleStart} className="btn btn-primary" style={{ width: "100%", padding: "14px 20px", fontSize: 15 }}>
+          시작하기
+        </button>
       </div>
     </div>
   );

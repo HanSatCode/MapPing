@@ -6,10 +6,9 @@ import Dashboard from "./pages/Dashboard";
 import DestinationSelect from "./pages/DestinationSelect";
 import DataInput from "./pages/DataInput";
 import DaysBasecampSetup from "./pages/DaysBasecampSetup";
-import ParsingLoading from "./pages/ParsingLoading";
 import ThemeSelection from "./pages/ThemeSelection";
-import GeneratingLoading from "./pages/GeneratingLoading";
 import Result from "./pages/Result";
+import { LoadingScreen } from "./components/LoadingScreen";
 
 function AppRoutes() {
   const location = useLocation();
@@ -24,9 +23,17 @@ function AppRoutes() {
         <Route path="/new/destination" element={<DestinationSelect />} />
         <Route path="/new/input" element={<DataInput />} />
         <Route path="/new/days" element={<DaysBasecampSetup />} />
-        <Route path="/new/parsing" element={<ParsingLoading />} />
         <Route path="/new/theme" element={<ThemeSelection />} />
-        <Route path="/new/generating" element={<GeneratingLoading />} />
+        <Route
+          path="/preview/loading"
+          element={
+            <LoadingScreen
+              message={"테마에 맞춰 동선을 최적화하고\n예산을 계산하고 있어요"}
+              subMessage="잠시만 기다려주세요"
+              ticks={["일차별로 장소를 배분하고 있어요", "최적 동선을 계산하고 있어요", "이동 시간과 교통비를 산출하고 있어요", "예산을 정리하고 있어요"]}
+            />
+          }
+        />
         <Route path="/result/:id" element={<Result />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

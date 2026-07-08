@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   DndContext,
+  DragOverlay,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -27,16 +30,30 @@ import {
   DEFAULT_DAY_END_TIME_TARGET,
   STAY_MINUTES,
   CATEGORY_LIST,
+  maxWalkMinutesToKm,
 } from "../lib/generate";
 import { geocodePlace, fetchPlaceDetails, hasMapsKey, MAPS_LIBRARIES, MAPS_SCRIPT_ID } from "../lib/geocode";
 import { categoryFromGoogleTypes, guessCategory, seededPriceLevel } from "../lib/parsePlaces";
 import { interpretNotes, recommendAiPlaces } from "../lib/notesInterpreter";
+import { generateDayCuration } from "../lib/curation";
+import { applyDayAreaConstraints, applyDayPlaceRequests } from "../lib/areaConstraint";
+import { demoDelay } from "../lib/demoMode";
 import { MapView, type MapPin } from "../components/MapView";
+import { LoadingScreen } from "../components/LoadingScreen";
 import { MarqueeText } from "../components/MarqueeText";
 import { Toggle } from "../components/Toggle";
 import type { Category, Itinerary, ParsedPlace, PlaceVisit } from "../types";
 
 const TRANSPORT_LABEL: Record<string, string> = { walk: "도보", transit: "대중교통", car: "자동차" };
+
+const REANALYZE_EXAMPLES = [
+  "아이랑 같이 가서 많이 안 걸었으면 좋겠어요",
+  "카페 위주로 다니고 싶어요",
+  "사진 찍기 좋은 곳 위주로 추천해주세요",
+  "쇼핑 시간을 넉넉하게 잡아주세요",
+  "맛집 위주로 다니고 싶어요",
+  "여유롭게 천천히 둘러보고 싶어요",
+];
 
 const CATEGORY_COLOR: Record<string, string> = {
   쇼핑: "linear-gradient(135deg, #f5a623, #e8871e)",
@@ -64,16 +81,49 @@ export default function Result() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
-  const [tab, setTab] = useState<"route" | "budget">("route");
+  const [tab, setTab] = useState<"route" | "budget" | "curation">("curation");
+  const [curationByDay, setCurationByDay] = useState<Record<number, string>>({});
+  const [curationLoadingDay, setCurationLoadingDay] = useState<number | null>(null);
   const [selectedDay, setSelectedDay] = useState(1);
   const [dirty, setDirty] = useState(false);
   const [newPlaceName, setNewPlaceName] = useState("");
   const [adding, setAdding] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [closingAddModal, setClosingAddModal] = useState(false);
   const [exchangeRateInput, setExchangeRateInput] = useState(String(DEFAULT_EXCHANGE_RATE));
   const [excludedCategoryFilter, setExcludedCategoryFilter] = useState<string | null>(null);
+  const [excludedSearchQuery, setExcludedSearchQuery] = useState("");
   const [focusedPlaceId, setFocusedPlaceId] = useState<string | null>(null);
   const [showReanalyzeModal, setShowReanalyzeModal] = useState(false);
+  const [closingReanalyzeModal, setClosingReanalyzeModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [closingExportModal, setClosingExportModal] = useState(false);
+  const [shared, setShared] = useState(false);
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [reorderTick, setReorderTick] = useState(0);
+
+  const MODAL_CLOSE_MS = 180;
+  const closeAddModal = () => {
+    setClosingAddModal(true);
+    setTimeout(() => {
+      setShowAddModal(false);
+      setClosingAddModal(false);
+    }, MODAL_CLOSE_MS);
+  };
+  const closeReanalyzeModal = () => {
+    setClosingReanalyzeModal(true);
+    setTimeout(() => {
+      setShowReanalyzeModal(false);
+      setClosingReanalyzeModal(false);
+    }, MODAL_CLOSE_MS);
+  };
+  const closeExportModal = () => {
+    setClosingExportModal(true);
+    setTimeout(() => {
+      setShowExportModal(false);
+      setClosingExportModal(false);
+    }, MODAL_CLOSE_MS);
+  };
   const [reanalyzeNotesInput, setReanalyzeNotesInput] = useState("");
   const [reanalyzing, setReanalyzing] = useState(false);
   const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
@@ -127,9 +177,49 @@ export default function Result() {
     return Array.from(map.entries());
   }, [itinerary]);
 
+  const currentDayVisits = itinerary?.itineraryDays.find((d) => d.dayIndex === selectedDay)?.visits;
+  const sortableVisitIds = useMemo(() => currentDayVisits?.map((v) => v.placeId) ?? [], [currentDayVisits]);
+
+  useEffect(() => {
+    if (tab !== "curation" || !itinerary) return;
+    const day = itinerary.itineraryDays.find((d) => d.dayIndex === selectedDay);
+    if (!day || day.visits.length === 0 || curationByDay[selectedDay] !== undefined) return;
+
+    if (day.curation) {
+      setCurationByDay((prev) => ({ ...prev, [selectedDay]: day.curation! }));
+      return;
+    }
+
+    let cancelled = false;
+    setCurationLoadingDay(selectedDay);
+    const placesMap = new Map(itinerary.places.map((p) => [p.id, p]));
+    Promise.all([generateDayCuration(itinerary.destinationLabel || "여행지", day, placesMap, itinerary.notes, itinerary.days), demoDelay()]).then(([text]) => {
+      if (cancelled) return;
+      setCurationByDay((prev) => ({ ...prev, [selectedDay]: text }));
+      setCurationLoadingDay(null);
+      if (!text) return;
+      setItinerary((prev) => {
+        if (!prev) return prev;
+        const updated = {
+          ...prev,
+          itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === selectedDay ? { ...d, curation: text } : d)),
+        };
+        saveItinerary(updated);
+        return updated;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, selectedDay, itinerary]);
+
   if (!itinerary) return null;
 
   const currentDay = itinerary.itineraryDays.find((d) => d.dayIndex === selectedDay);
+  const filteredExcludedPlaces = excludedByCategory
+    .filter(([category]) => excludedSearchQuery.trim() || !excludedCategoryFilter || category === excludedCategoryFilter)
+    .flatMap(([, places]) => places)
+    .filter((place) => place.name.toLowerCase().includes(excludedSearchQuery.trim().toLowerCase()));
   const startPoint = itinerary.basecamp ?? itinerary.recommendedCenter ?? computeCentroid(itinerary.places);
   const allowCar = itinerary.allowCar ?? true;
   const dayTimeline = currentDay
@@ -166,11 +256,13 @@ export default function Result() {
       prev
         ? {
             ...prev,
-            itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === selectedDay ? { ...d, ...refined } : d)),
+            itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === selectedDay ? { ...d, ...refined, curation: undefined } : d)),
           }
         : prev
     );
+    setCurationByDay((prev) => { const next = { ...prev }; delete next[selectedDay]; return next; });
     setDirty(true);
+    setReorderTick((t) => t + 1);
   };
 
   const handleDeletePlace = async (placeId: string) => {
@@ -193,11 +285,12 @@ export default function Result() {
         ? {
             ...prev,
             places: newPlaces,
-            itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === affectedDay?.dayIndex && refined ? { ...d, ...refined } : d)),
+            itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === affectedDay?.dayIndex && refined ? { ...d, ...refined, curation: undefined } : d)),
             budgetOverrides: prev.budgetOverrides.filter((o) => o.placeId !== placeId),
           }
         : prev
     );
+    if (affectedDay) setCurationByDay((prev) => { const next = { ...prev }; delete next[affectedDay.dayIndex]; return next; });
     setDirty(true);
   };
 
@@ -215,10 +308,11 @@ export default function Result() {
         ? {
             ...prev,
             places: newPlaces,
-            itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === selectedDay ? { ...d, ...refined } : d)),
+            itineraryDays: prev.itineraryDays.map((d) => (d.dayIndex === selectedDay ? { ...d, ...refined, curation: undefined } : d)),
           }
         : prev
     );
+    setCurationByDay((prev) => { const next = { ...prev }; delete next[selectedDay]; return next; });
     setDirty(true);
   };
 
@@ -331,27 +425,12 @@ export default function Result() {
     setDirty(true);
   };
 
-  const handleThemeChange = async (dayIndex: number, newTheme: Category | null) => {
+  const handleThemeChange = (dayIndex: number, newTheme: Category | null) => {
     const newDayThemes = itinerary.dayThemes.map((dt) => (dt.dayIndex === dayIndex ? { ...dt, theme: newTheme } : dt));
-    const allPlaces = [...itinerary.places, ...itinerary.excludedPlaces];
-    const { itineraryDays: builtDays, excludedPlaces } = buildItineraryDays(allPlaces, newDayThemes, startPoint, undefined, allowCar);
-    const excludedIds = new Set(excludedPlaces.map((p) => p.id));
-    const includedPlaces = allPlaces.filter((p) => !excludedIds.has(p.id));
-
-    const itineraryDays = await Promise.all(
-      builtDays.map(async (day) => {
-        const refined = await refineDay(day.visits, includedPlaces);
-        return { ...day, ...refined };
-      })
-    );
-
     setItinerary({
       ...itinerary,
       dayThemes: newDayThemes,
-      places: includedPlaces,
-      excludedPlaces,
-      itineraryDays,
-      budgetOverrides: itinerary.budgetOverrides.filter((o) => includedPlaces.some((p) => p.id === o.placeId)),
+      itineraryDays: itinerary.itineraryDays.map((d) => (d.dayIndex === dayIndex ? { ...d, theme: newTheme } : d)),
     });
     setDirty(true);
   };
@@ -391,6 +470,7 @@ export default function Result() {
       itineraryDays,
       budgetOverrides: itinerary.budgetOverrides.filter((o) => includedPlaces.some((p) => p.id === o.placeId)),
     });
+    setCurationByDay({});
     setDirty(true);
   };
 
@@ -406,13 +486,75 @@ export default function Result() {
     const combinedNotes = reanalyzeNotesInput.trim();
     setReanalyzing(true);
     try {
-      const interpretation = await interpretNotes(combinedNotes, itinerary.places, itinerary.days);
+      const [interpretation] = await Promise.all([interpretNotes(combinedNotes, itinerary.places, itinerary.days), demoDelay()]);
+
+      const destinationLabel = itinerary.destinationLabel || itinerary.basecamp?.name || itinerary.basecamp?.address || "여행지";
+      const destinationCenter = itinerary.basecamp ?? startPoint;
+      const hasDayAreaConstraints = (interpretation?.dayAreaConstraints?.length ?? 0) > 0;
+      const hasDayPlaceRequests = (interpretation?.dayPlaceRequests?.length ?? 0) > 0;
+      // 요청사항이 "N일차에는 ~"처럼 특정 날짜에만 관련된 것이면, 다른 날짜는 절대 건드리지 않고
+      // 그 날짜만 수술하듯 수정한다 (전체를 다시 배분하면 다른 날짜까지 흔들리기 때문).
+      const isDayScopedOnly = (hasDayAreaConstraints || hasDayPlaceRequests) && !interpretation?.dayCapacity;
+
+      if (isDayScopedOnly) {
+        const basePool = [...itinerary.places, ...itinerary.excludedPlaces].map((p) =>
+          interpretation!.mustVisitIds.includes(p.id) ? { ...p, mustVisit: true } : p
+        );
+
+        let itineraryDays = itinerary.itineraryDays;
+        let finalPlaces = basePool;
+
+        if (hasDayAreaConstraints) {
+          const applied = await applyDayAreaConstraints(
+            interpretation!.dayAreaConstraints!,
+            itineraryDays,
+            finalPlaces,
+            destinationCenter,
+            startPoint,
+            allowCar,
+            combinedNotes,
+            destinationLabel
+          );
+          itineraryDays = applied.itineraryDays;
+          finalPlaces = applied.allPlaces;
+        }
+
+        if (hasDayPlaceRequests) {
+          const applied = await applyDayPlaceRequests(
+            interpretation!.dayPlaceRequests!,
+            itineraryDays,
+            finalPlaces,
+            destinationCenter,
+            startPoint,
+            allowCar
+          );
+          itineraryDays = applied.itineraryDays;
+          finalPlaces = applied.allPlaces;
+        }
+
+        const usedPlaceIds = new Set(itineraryDays.flatMap((d) => d.visits.map((v) => v.placeId)));
+        const finalIncludedPlaces = finalPlaces.filter((p) => usedPlaceIds.has(p.id));
+        const finalExcludedPlaces = finalPlaces.filter((p) => !usedPlaceIds.has(p.id));
+
+        setItinerary({
+          ...itinerary,
+          notes: combinedNotes,
+          places: finalIncludedPlaces,
+          excludedPlaces: finalExcludedPlaces,
+          itineraryDays,
+          budgetOverrides: itinerary.budgetOverrides.filter((o) => finalIncludedPlaces.some((p) => p.id === o.placeId)),
+        });
+        setCurationByDay({});
+        setDirty(true);
+        closeReanalyzeModal();
+        return;
+      }
+
       const placesWithMustVisit =
         interpretation && interpretation.mustVisitIds.length > 0
           ? itinerary.places.map((p) => (interpretation.mustVisitIds.includes(p.id) ? { ...p, mustVisit: true } : p))
           : itinerary.places;
 
-      const destinationLabel = itinerary.destinationLabel || itinerary.basecamp?.name || itinerary.basecamp?.address || "여행지";
       const locationContext = itinerary.basecamp?.name || itinerary.basecamp?.address;
       const aiRecommendations = await recommendAiPlaces(destinationLabel, placesWithMustVisit, combinedNotes, itinerary.days, locationContext);
 
@@ -420,7 +562,7 @@ export default function Result() {
         alert("AI 재분석에 실패했어요. API 키 설정 또는 사용량 한도를 확인해주세요.\n(요청사항 텍스트는 저장됩니다.)");
         setItinerary({ ...itinerary, notes: combinedNotes });
         setDirty(true);
-        setShowReanalyzeModal(false);
+        closeReanalyzeModal();
         return;
       }
 
@@ -442,6 +584,7 @@ export default function Result() {
             category: rec.category,
             mustVisit: false,
             aiRecommended: true,
+            aiReason: rec.reason,
           };
           return place;
         })
@@ -449,27 +592,60 @@ export default function Result() {
 
       const nearbyAiPlaces = newAiPlaces.filter((p) => haversineKm(startPoint, p) <= MAX_AI_PLACE_DISTANCE_KM);
       const allPlaces = [...placesWithMustVisit, ...nearbyAiPlaces];
-      const { itineraryDays, excludedPlaces } = buildItineraryDays(
+      const { itineraryDays: builtDays } = buildItineraryDays(
         allPlaces,
         itinerary.dayThemes,
         startPoint,
         interpretation?.dayCapacity,
-        allowCar
+        allowCar,
+        interpretation?.maxWalkMinutes ? maxWalkMinutesToKm(interpretation.maxWalkMinutes) : undefined
       );
-      const excludedIds = new Set(excludedPlaces.map((p) => p.id));
-      const includedPlaces = allPlaces.filter((p) => !excludedIds.has(p.id));
+
+      let itineraryDays = builtDays;
+      let finalPlaces = allPlaces;
+      if (hasDayAreaConstraints) {
+        const applied = await applyDayAreaConstraints(
+          interpretation!.dayAreaConstraints!,
+          builtDays,
+          allPlaces,
+          destinationCenter,
+          startPoint,
+          allowCar,
+          combinedNotes,
+          destinationLabel
+        );
+        itineraryDays = applied.itineraryDays;
+        finalPlaces = applied.allPlaces;
+      }
+      if (hasDayPlaceRequests) {
+        const applied = await applyDayPlaceRequests(
+          interpretation!.dayPlaceRequests!,
+          itineraryDays,
+          finalPlaces,
+          destinationCenter,
+          startPoint,
+          allowCar
+        );
+        itineraryDays = applied.itineraryDays;
+        finalPlaces = applied.allPlaces;
+      }
+
+      const usedPlaceIds = new Set(itineraryDays.flatMap((d) => d.visits.map((v) => v.placeId)));
+      const finalIncludedPlaces = finalPlaces.filter((p) => usedPlaceIds.has(p.id));
+      const finalExcludedPlaces = finalPlaces.filter((p) => !usedPlaceIds.has(p.id));
 
       setItinerary({
         ...itinerary,
         notes: combinedNotes,
-        places: includedPlaces,
-        excludedPlaces,
+        places: finalIncludedPlaces,
+        excludedPlaces: finalExcludedPlaces,
         itineraryDays,
-        budgetOverrides: itinerary.budgetOverrides.filter((o) => includedPlaces.some((p) => p.id === o.placeId)),
+        budgetOverrides: itinerary.budgetOverrides.filter((o) => finalIncludedPlaces.some((p) => p.id === o.placeId)),
       });
       setSelectedDay(itineraryDays[0]?.dayIndex ?? 1);
+      setCurationByDay({});
       setDirty(true);
-      setShowReanalyzeModal(false);
+      closeReanalyzeModal();
     } finally {
       setReanalyzing(false);
     }
@@ -478,13 +654,13 @@ export default function Result() {
   const handleSave = () => {
     saveItinerary(itinerary);
     setDirty(false);
-    alert("저장되었습니다.");
   };
 
   const handleShare = () => {
     const url = `${window.location.origin}/result/${itinerary.id}?shared=1`;
     navigator.clipboard?.writeText(url).catch(() => {});
-    alert(`공유 링크가 복사되었습니다:\n${url}`);
+    setShared(true);
+    setTimeout(() => setShared(false), 1500);
   };
 
   const handleExportTimetable = () => {
@@ -554,7 +730,23 @@ export default function Result() {
 
   return (
     <div className="page-fade with-bottom-nav" style={{ maxWidth: 1180, margin: "0 auto", padding: "24px 24px", width: "100%" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, flexWrap: "wrap", gap: 12 }}>
+      <div
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 50,
+          margin: "-24px -24px 14px",
+          padding: "24px 24px 14px",
+          background: "rgba(246,247,251,0.85)",
+          backdropFilter: "blur(10px)",
+          borderBottom: "1px solid rgba(230,232,238,0.8)",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+          gap: 12,
+        }}
+      >
         <div>
           <input
             value={itinerary.title}
@@ -570,44 +762,17 @@ export default function Result() {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => navigate("/dashboard")} style={secondaryBtn}>대시보드로</button>
-          <button onClick={handleExportTimetable} style={secondaryBtn}>시간표 내보내기</button>
-          <button onClick={handleExportJson} style={secondaryBtn}>JSON 내보내기</button>
-          <button onClick={handleShare} style={secondaryBtn}>공유</button>
-          <button onClick={handleSave} style={primaryBtn}>{dirty ? "변경사항 저장" : "저장됨"}</button>
+          <button onClick={() => setShowReanalyzeModal(true)} style={reanalyzeBtn} className="reanalyze-glow">
+            <span style={{ position: "relative", zIndex: 1 }}>✨ 재분석</span>
+          </button>
+          <button onClick={() => setShowExportModal(true)} style={secondaryBtn}>내보내기</button>
+          <button onClick={handleShare} style={shared ? sharedBtn : shareBtnBase} className={shared ? "share-bump" : undefined}>{shared ? "복사 완료!" : "공유하기"}</button>
+          <button onClick={handleSave} style={dirty ? unsavedBtn : savedBtn} className={dirty ? "save-pulse" : undefined} disabled={!dirty}>{dirty ? "변경사항 저장" : "저장됨"}</button>
         </div>
-      </div>
-
-      {itinerary.basecampUndecided && itinerary.recommendedCenter && (
-        <div style={{ background: "#e9fbf3", border: "1px solid #b7ecd8", borderRadius: 12, padding: "14px 18px", marginBottom: 20, fontSize: 14, color: "var(--success)" }}>
-          🏠 가고 싶은 곳들이 이 지역에 모여있어요! 지도에 표시된 <b>추천 중심점</b> 근처에 숙소를 잡아보세요.
-        </div>
-      )}
-
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          background: "var(--primary-light)",
-          border: "1px solid #c7d6fb",
-          borderRadius: 12,
-          padding: "14px 18px",
-          marginBottom: 20,
-          fontSize: 14,
-          color: "var(--primary-dark)",
-        }}
-      >
-        <span>{itinerary.notes.trim() ? <>💬 요청사항: {itinerary.notes}</> : "💬 요청사항을 추가하면 AI가 일정을 다시 짜드려요."}</span>
-        <button
-          onClick={() => setShowReanalyzeModal(true)}
-          style={{ flexShrink: 0, padding: "6px 14px", borderRadius: 999, border: "1px solid var(--primary)", background: "#fff", color: "var(--primary-dark)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
-        >
-          ✨ 재분석
-        </button>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <button onClick={() => setTab("curation")} style={tabBtn(tab === "curation")}>✨ 큐레이션</button>
         <button onClick={() => setTab("route")} style={tabBtn(tab === "route")}>동선</button>
         <button onClick={() => setTab("budget")} style={tabBtn(tab === "budget")}>예산</button>
       </div>
@@ -665,19 +830,25 @@ export default function Result() {
                 </div>
               )}
 
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                <SortableContext items={currentDay?.visits.map((v) => v.placeId) ?? []} strategy={verticalListSortingStrategy}>
-                  <div
-                    className="scroll-fade"
-                    style={{ display: "flex", flexDirection: "column", gap: 16, maxHeight: 300, overflowY: "auto", padding: "20px 26px", margin: "-20px -26px" }}
-                  >
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragStart={(event: DragStartEvent) => setActiveDragId(String(event.active.id))}
+                onDragEnd={(event) => {
+                  setActiveDragId(null);
+                  handleDragEnd(event);
+                }}
+                onDragCancel={() => setActiveDragId(null)}
+              >
+                <SortableContext items={sortableVisitIds} strategy={verticalListSortingStrategy}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                     {currentDay?.visits.map((visit, idx) => {
                       const place = placeById.get(visit.placeId);
                       if (!place) return null;
                       const stop = timelineByPlaceId.get(visit.placeId);
                       return (
                         <SortableVisitRow
-                          key={visit.placeId}
+                          key={`${visit.placeId}-${reorderTick}`}
                           id={visit.placeId}
                           index={idx}
                           place={place}
@@ -701,6 +872,27 @@ export default function Result() {
                     {currentDay?.visits.length === 0 && <p style={{ color: "#adb5bd" }}>이 날에 배정된 장소가 없어요.</p>}
                   </div>
                 </SortableContext>
+                {createPortal(
+                  <DragOverlay>
+                    {activeDragId
+                      ? (() => {
+                          const idx = currentDay?.visits.findIndex((v) => v.placeId === activeDragId) ?? -1;
+                          const visit = idx >= 0 ? currentDay!.visits[idx] : undefined;
+                          const place = visit ? placeById.get(visit.placeId) : undefined;
+                          return place && visit ? (
+                            <DragPreviewRow
+                              index={idx}
+                              place={place}
+                              mode={visit.transportMode}
+                              travelTimeMin={visit.travelTimeMin}
+                              stayMinutes={visit.stayMinutes ?? STAY_MINUTES[place.category]}
+                            />
+                          ) : null;
+                        })()
+                      : null}
+                  </DragOverlay>,
+                  document.body
+                )}
               </DndContext>
 
               {currentDay?.returnLeg && (
@@ -716,13 +908,13 @@ export default function Result() {
                         · 예상 도착{" "}
                         <b
                           style={{
-                            color: timeToMinutes(dayTimeline.endTime) > timeToMinutes(effectiveEndTimeTarget) ? "var(--danger)" : "var(--text)",
+                            color: dayTimeline.endMinutes > timeToMinutes(effectiveEndTimeTarget) ? "var(--danger)" : "var(--text)",
                           }}
                         >
                           {dayTimeline.endTime}
                         </b>{" "}
                         (목표 {effectiveEndTimeTarget}
-                        {timeToMinutes(dayTimeline.endTime) > timeToMinutes(effectiveEndTimeTarget) ? " 초과!" : ""})
+                        {dayTimeline.endMinutes > timeToMinutes(effectiveEndTimeTarget) ? " 초과!" : ""})
                       </>
                     )}
                   </div>
@@ -742,6 +934,37 @@ export default function Result() {
                 + {selectedDay}일차에 장소 추가하기
               </button>
             </>
+          )}
+
+          {tab === "curation" && (
+            <div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+                {itinerary.itineraryDays.map((d) => (
+                  <button key={d.dayIndex} onClick={() => setSelectedDay(d.dayIndex)} style={dayBtn(d.dayIndex === selectedDay)}>
+                    {d.dayIndex}일차{d.theme ? ` · ${d.theme}` : ""}
+                  </button>
+                ))}
+              </div>
+
+              {currentDay && currentDay.visits.length === 0 && (
+                <div className="card" style={{ padding: "16px 18px", color: "#adb5bd" }}>이 날에 배정된 장소가 없어요.</div>
+              )}
+
+              {currentDay && currentDay.visits.length > 0 && curationLoadingDay === selectedDay &&
+                createPortal(
+                  <LoadingScreen message="AI가 이 날의 동선을 살펴보고 있어요" subMessage="큐레이션을 준비하고 있어요" />,
+                  document.body
+                )}
+
+              {currentDay && curationLoadingDay !== selectedDay && curationByDay[selectedDay] && (
+                <div className="card pop-in" style={{ padding: "20px 22px" }}>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>✨ {selectedDay}일차, 이렇게 큐레이션했어요</h3>
+                  <div style={{ whiteSpace: "pre-line", fontSize: 14, lineHeight: 1.7, color: "var(--text)" }}>
+                    {curationByDay[selectedDay]}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           {tab === "budget" && (
@@ -830,24 +1053,25 @@ export default function Result() {
           )}
         </div>
 
-        <div>
+        <div className="result-map-sticky">
           <MapView pins={mapPins} height={520} focusId={focusedPlaceId} />
         </div>
       </div>
 
-      {showAddModal && (
+      {showAddModal && createPortal(
         <div
-          onClick={() => setShowAddModal(false)}
+          onClick={closeAddModal}
+          className={closingAddModal ? "fade-out" : "fade-in"}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="card"
+            className={`card ${closingAddModal ? "pop-out" : "pop-in"}`}
             style={{ width: "100%", maxWidth: 480, maxHeight: "80vh", overflowY: "auto", padding: 24 }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <h3 style={{ margin: 0, fontSize: 17 }}>{selectedDay}일차에 장소 추가</h3>
-              <button onClick={() => setShowAddModal(false)} style={{ border: "none", background: "none", cursor: "pointer", fontSize: 18, color: "var(--text-muted)" }}>✕</button>
+              <button onClick={closeAddModal} style={{ border: "none", background: "none", cursor: "pointer", fontSize: 18, color: "var(--text-muted)" }}>✕</button>
             </div>
 
             <label style={{ display: "block", fontWeight: 700, marginBottom: 8, fontSize: 13, color: "var(--text-muted)" }}>
@@ -895,31 +1119,42 @@ export default function Result() {
 
             {excludedByCategory.length > 0 && (
               <div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-                  {excludedByCategory.map(([category]) => (
-                    <button
-                      key={category}
-                      onClick={() => setExcludedCategoryFilter(excludedCategoryFilter === category ? null : category)}
-                      style={{
-                        padding: "6px 14px",
-                        borderRadius: 999,
-                        border: excludedCategoryFilter === category ? "none" : "1px solid var(--border)",
-                        background: excludedCategoryFilter === category ? "linear-gradient(135deg, var(--primary), #5b7ff5)" : "#fff",
-                        color: excludedCategoryFilter === category ? "#fff" : "var(--text)",
-                        fontSize: 13,
-                        fontWeight: 600,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {category}
-                    </button>
-                  ))}
-                </div>
+                <input
+                  type="text"
+                  value={excludedSearchQuery}
+                  onChange={(e) => setExcludedSearchQuery(e.target.value)}
+                  placeholder="🔍 장소 이름으로 검색 (전체 카테고리)"
+                  style={{ width: "100%", padding: "10px 14px", borderRadius: 10, border: "1px solid var(--border)", fontSize: 14, marginBottom: 12, boxSizing: "border-box" }}
+                />
+                {!excludedSearchQuery.trim() && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                    {excludedByCategory.map(([category]) => (
+                      <button
+                        key={category}
+                        onClick={() => setExcludedCategoryFilter(excludedCategoryFilter === category ? null : category)}
+                        style={{
+                          padding: "6px 14px",
+                          borderRadius: 999,
+                          border: excludedCategoryFilter === category ? "none" : "1px solid var(--border)",
+                          background: excludedCategoryFilter === category ? "linear-gradient(135deg, var(--primary), #5b7ff5)" : "#fff",
+                          color: excludedCategoryFilter === category ? "#fff" : "var(--text)",
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {category}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {excludedByCategory
-                    .filter(([category]) => !excludedCategoryFilter || category === excludedCategoryFilter)
-                    .flatMap(([, places]) => places)
-                    .map((place) => (
+                  {filteredExcludedPlaces.length === 0 && excludedSearchQuery.trim() && (
+                    <div style={{ padding: "16px 0", textAlign: "center", color: "#adb5bd", fontSize: 13 }}>
+                      "{excludedSearchQuery}"에 해당하는 장소가 없어요.
+                    </div>
+                  )}
+                  {filteredExcludedPlaces.map((place) => (
                       <button
                         key={place.id}
                         onClick={() => handleAddFromExcluded(place)}
@@ -949,23 +1184,25 @@ export default function Result() {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {showReanalyzeModal && (
+      {showReanalyzeModal && createPortal(
         <div
-          onClick={() => !reanalyzing && setShowReanalyzeModal(false)}
+          onClick={() => !reanalyzing && closeReanalyzeModal()}
+          className={closingReanalyzeModal ? "fade-out" : "fade-in"}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="card"
+            className={`card ${closingReanalyzeModal ? "pop-out" : "pop-in"}`}
             style={{ width: "100%", maxWidth: 480, padding: 24 }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <h3 style={{ margin: 0, fontSize: 17 }}>✨ 요청사항으로 재분석</h3>
               {!reanalyzing && (
-                <button onClick={() => setShowReanalyzeModal(false)} style={{ border: "none", background: "none", cursor: "pointer", fontSize: 18, color: "var(--text-muted)" }}>✕</button>
+                <button onClick={closeReanalyzeModal} style={{ border: "none", background: "none", cursor: "pointer", fontSize: 18, color: "var(--text-muted)" }}>✕</button>
               )}
             </div>
             <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>
@@ -979,6 +1216,32 @@ export default function Result() {
               rows={4}
               style={{ width: "100%", padding: "10px 14px", borderRadius: 10, border: "1px solid var(--border)", fontSize: 14, boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }}
             />
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+              {REANALYZE_EXAMPLES.map((example) => (
+                <button
+                  key={example}
+                  type="button"
+                  disabled={reanalyzing}
+                  onClick={() =>
+                    setReanalyzeNotesInput((prev) =>
+                      prev.trim() ? `${prev.trim()}, ${example}` : example
+                    )
+                  }
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 999,
+                    border: "1px solid var(--border)",
+                    background: "#fff",
+                    color: "var(--text-muted)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: reanalyzing ? "default" : "pointer",
+                  }}
+                >
+                  + {example}
+                </button>
+              ))}
+            </div>
             <button
               onClick={handleReanalyze}
               disabled={reanalyzing}
@@ -988,7 +1251,50 @@ export default function Result() {
               {reanalyzing ? "재분석 중..." : "재분석 시작"}
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
+      )}
+
+      {showExportModal && createPortal(
+        <div
+          onClick={closeExportModal}
+          className={closingExportModal ? "fade-out" : "fade-in"}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className={`card ${closingExportModal ? "pop-out" : "pop-in"}`}
+            style={{ width: "100%", maxWidth: 340, padding: 24 }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 17 }}>📤 내보내기</h3>
+              <button onClick={closeExportModal} style={{ border: "none", background: "none", cursor: "pointer", fontSize: 18, color: "var(--text-muted)" }}>✕</button>
+            </div>
+            <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+              <button
+                onClick={() => {
+                  handleExportJson();
+                  closeExportModal();
+                }}
+                style={exportChoiceBtn}
+              >
+                <span style={{ fontSize: 32 }}>🗂️</span>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>JSON</span>
+              </button>
+              <button
+                onClick={() => {
+                  handleExportTimetable();
+                  closeExportModal();
+                }}
+                style={exportChoiceBtn}
+              >
+                <span style={{ fontSize: 32 }}>📊</span>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>CSV</span>
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -1035,7 +1341,6 @@ function SortableVisitRow({
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.6 : 1,
     animationDelay: `${delay}ms`,
   };
 
@@ -1043,7 +1348,7 @@ function SortableVisitRow({
     <div
       ref={setNodeRef}
       className={`card pop-in visit-row${focused ? " focused" : ""}`}
-      onClick={onFocus}
+      onClick={isDragging ? undefined : onFocus}
       style={{
         ...style,
         display: "flex",
@@ -1051,10 +1356,115 @@ function SortableVisitRow({
         gap: 12,
         padding: "14px 16px",
         cursor: onFocus ? "pointer" : undefined,
+        ...(isDragging
+          ? {
+              border: "2px dashed #8ca3f7",
+              background: "rgba(199,210,255,0.18)",
+              boxShadow: "none",
+            }
+          : {}),
       }}
       {...attributes}
     >
-      <div {...listeners} style={{ cursor: "grab", color: "#c2c7d2", fontSize: 18, padding: "0 4px" }}>⠿</div>
+      <div style={{ visibility: isDragging ? "hidden" : "visible", display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
+        <div {...listeners} style={{ cursor: "grab", color: "#c2c7d2", fontSize: 18, padding: "0 4px" }}>⠿</div>
+        <div
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            background: CATEGORY_COLOR[place.category] ?? CATEGORY_COLOR["기타"],
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 13,
+            fontWeight: 700,
+            flexShrink: 0,
+          }}
+        >
+          {index + 1}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            <MarqueeText text={place.name} style={{ fontWeight: 700 }} />
+            {place.aiRecommended && <AiBadge />}
+            {arrival && departure && (
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--primary-dark)", background: "var(--primary-light)", padding: "1px 8px", borderRadius: 999, flexShrink: 0 }}>
+                {arrival} - {departure}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--text-muted)", marginTop: 2, flexWrap: "wrap" }}>
+            <span>{TRANSPORT_LABEL[mode]} · {travelTimeMin}분 ·</span>
+            <input
+              value={travelCost.toLocaleString("ko-KR")}
+              onChange={(e) => onTravelCostChange(e.target.value)}
+              aria-label={`${place.name} 이동 비용`}
+              style={{ width: 76, padding: "3px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 12 }}
+            />
+            {onStayMinutesChange && stayMinutes !== undefined && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                · 체류
+                <input
+                  type="number"
+                  min={0}
+                  step={5}
+                  value={stayMinutes}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => onStayMinutesChange(e.target.value)}
+                  aria-label={`${place.name} 체류 시간(분)`}
+                  style={{ width: 48, padding: "3px 4px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 12, textAlign: "right" }}
+                />
+                분
+              </span>
+            )}
+          </div>
+        </div>
+        <input
+          value={placeCost.toLocaleString("ko-KR")}
+          onChange={(e) => onPlaceCostChange(e.target.value)}
+          aria-label={`${place.name} 예상 비용`}
+          style={{ width: 90, textAlign: "right", padding: "6px 8px", borderRadius: 8, border: "1px solid var(--border)", fontWeight: 700, fontSize: 12, color: "var(--primary-dark)" }}
+        />
+        <button
+          onClick={onDelete}
+          aria-label={`${place.name} 삭제`}
+          style={{ border: "none", background: "none", cursor: "pointer", fontSize: 16, padding: "4px 2px", color: "var(--text-muted)" }}
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DragPreviewRow({
+  index,
+  place,
+  mode,
+  travelTimeMin,
+  stayMinutes,
+}: {
+  index: number;
+  place: ParsedPlace;
+  mode: string;
+  travelTimeMin: number;
+  stayMinutes?: number;
+}) {
+  return (
+    <div
+      className="card"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "14px 16px",
+        boxShadow: "0 12px 28px rgba(0,0,0,0.18)",
+        cursor: "grabbing",
+      }}
+    >
+      <div style={{ color: "#c2c7d2", fontSize: 18, padding: "0 4px" }}>⠿</div>
       <div
         style={{
           width: 28,
@@ -1072,55 +1482,12 @@ function SortableVisitRow({
       >
         {index + 1}
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <MarqueeText text={place.name} style={{ fontWeight: 700 }} />
-          {place.aiRecommended && <AiBadge />}
-          {arrival && departure && (
-            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--primary-dark)", background: "var(--primary-light)", padding: "1px 8px", borderRadius: 999, flexShrink: 0 }}>
-              {arrival} - {departure}
-            </span>
-          )}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--text-muted)", marginTop: 2, flexWrap: "wrap" }}>
-          <span>{TRANSPORT_LABEL[mode]} · {travelTimeMin}분 ·</span>
-          <input
-            value={travelCost.toLocaleString("ko-KR")}
-            onChange={(e) => onTravelCostChange(e.target.value)}
-            aria-label={`${place.name} 이동 비용`}
-            style={{ width: 76, padding: "3px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 12 }}
-          />
-          {onStayMinutesChange && stayMinutes !== undefined && (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-              · 체류
-              <input
-                type="number"
-                min={0}
-                step={5}
-                value={stayMinutes}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => onStayMinutesChange(e.target.value)}
-                aria-label={`${place.name} 체류 시간(분)`}
-                style={{ width: 48, padding: "3px 4px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 12, textAlign: "right" }}
-              />
-              분
-            </span>
-          )}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{place.name}</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+          {TRANSPORT_LABEL[mode]} · {travelTimeMin}분{stayMinutes !== undefined ? ` · 체류 ${stayMinutes}분` : ""}
         </div>
       </div>
-      <input
-        value={placeCost.toLocaleString("ko-KR")}
-        onChange={(e) => onPlaceCostChange(e.target.value)}
-        aria-label={`${place.name} 예상 비용`}
-        style={{ width: 90, textAlign: "right", padding: "6px 8px", borderRadius: 8, border: "1px solid var(--border)", fontWeight: 700, fontSize: 12, color: "var(--primary-dark)" }}
-      />
-      <button
-        onClick={onDelete}
-        aria-label={`${place.name} 삭제`}
-        style={{ border: "none", background: "none", cursor: "pointer", fontSize: 16, padding: "4px 2px", color: "var(--text-muted)" }}
-      >
-        ✕
-      </button>
     </div>
   );
 }
@@ -1144,17 +1511,60 @@ function AiBadge() {
   );
 }
 
-const primaryBtn: React.CSSProperties = {
+const savedBtn: React.CSSProperties = {
+  padding: "10px 20px",
+  borderRadius: 10,
+  border: "1px solid var(--border)",
+  background: "#fff",
+  color: "var(--text-muted)",
+  fontWeight: 700,
+  cursor: "default",
+  boxShadow: "none",
+  transition: "background 0.25s ease, color 0.25s ease, box-shadow 0.25s ease",
+};
+const unsavedBtn: React.CSSProperties = {
   padding: "10px 20px",
   borderRadius: 10,
   border: "none",
-  background: "linear-gradient(135deg, var(--primary), #5b7ff5)",
+  background: "linear-gradient(135deg, #f0913b, #d9691f)",
   color: "#fff",
   fontWeight: 700,
   cursor: "pointer",
-  boxShadow: "0 6px 14px rgba(59,109,240,0.28)",
+  boxShadow: "0 6px 14px rgba(217,105,31,0.28)",
+  transition: "background 0.25s ease, color 0.25s ease, box-shadow 0.25s ease",
 };
-const secondaryBtn: React.CSSProperties = { padding: "10px 20px", borderRadius: 10, border: "1px solid var(--border)", background: "#fff", cursor: "pointer" };
+const secondaryBtn: React.CSSProperties = { padding: "10px 20px", borderRadius: 10, border: "1px solid var(--border)", background: "#fff", cursor: "pointer", transition: "background 0.25s ease, color 0.25s ease" };
+const shareBtnBase: React.CSSProperties = {
+  ...secondaryBtn,
+  minWidth: 92,
+  textAlign: "center",
+  whiteSpace: "nowrap",
+  border: "1px solid var(--border)",
+  borderColor: "var(--border)",
+  transition: "background 0.25s ease, color 0.25s ease, border-color 0.25s ease",
+};
+const sharedBtn: React.CSSProperties = { ...shareBtnBase, background: "#e9fbf3", color: "var(--success)", borderColor: "#b7ecd8" };
+const exportChoiceBtn: React.CSSProperties = {
+  width: 100,
+  height: 100,
+  borderRadius: 16,
+  border: "1px solid var(--border)",
+  background: "#fff",
+  cursor: "pointer",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+};
+const reanalyzeBtn: React.CSSProperties = {
+  padding: "10px 20px",
+  borderRadius: 10,
+  border: "1px solid var(--border)",
+  color: "var(--text)",
+  fontWeight: 700,
+  cursor: "pointer",
+};
 const tabBtn = (active: boolean): React.CSSProperties => ({
   padding: "10px 24px",
   borderRadius: 10,

@@ -12,6 +12,8 @@ export interface ParsedPlace {
   category: Category;
   mustVisit: boolean;
   aiRecommended?: boolean;
+  aiReason?: string;
+  excluded?: boolean;
 }
 
 export interface DayTheme {
@@ -42,6 +44,7 @@ export interface ItineraryDay {
   dailyTransitBudget: number;
   startTime?: string;
   endTimeTarget?: string;
+  curation?: string;
 }
 
 export interface Basecamp {

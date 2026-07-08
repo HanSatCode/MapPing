@@ -1,22 +1,28 @@
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { Autocomplete, useJsApiLoader } from "@react-google-maps/api";
 import { ProgressBar } from "../components/ProgressBar";
+import { LoadingScreen } from "../components/LoadingScreen";
 import { useWizard } from "../lib/WizardContext";
 import { geocodePlace, hasMapsKey, MAPS_LIBRARIES, MAPS_SCRIPT_ID } from "../lib/geocode";
+import { parsePlacesFromText, type ParsePlacesProgress } from "../lib/parsePlaces";
+import { demoDelay } from "../lib/demoMode";
 import { WIZARD_STEPS } from "../lib/wizardSteps";
 import { getDestination } from "../lib/destinations";
 import { Toggle } from "../components/Toggle";
 
 export default function DaysBasecampSetup() {
   const navigate = useNavigate();
-  const { destination, days, setDays, basecamp, setBasecamp, basecampUndecided, setBasecampUndecided, allowCar, setAllowCar } = useWizard();
+  const { rawText, destination, days, setDays, basecamp, setBasecamp, basecampUndecided, setBasecampUndecided, allowCar, setAllowCar, setPlaces } = useWizard();
   const destinationCenter = getDestination(destination);
   const [basecampName, setBasecampName] = useState(basecamp?.name ?? "");
   const [pickedPlace, setPickedPlace] = useState<{ address?: string; lat: number; lng: number } | null>(
     basecamp ? { address: basecamp.address, lat: basecamp.lat, lng: basecamp.lng } : null
   );
   const [loading, setLoading] = useState(false);
+  const [foundCount, setFoundCount] = useState<number | null>(null);
+  const [parseProgress, setParseProgress] = useState<ParsePlacesProgress | null>(null);
   const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
 
   const { isLoaded } = useJsApiLoader({
@@ -43,6 +49,11 @@ export default function DaysBasecampSetup() {
       return;
     }
 
+    if (!rawText.trim()) {
+      navigate("/new/input");
+      return;
+    }
+
     setLoading(true);
     if (!basecampUndecided) {
       if (pickedPlace && pickedPlace.address !== undefined) {
@@ -54,8 +65,23 @@ export default function DaysBasecampSetup() {
     } else {
       setBasecamp(null);
     }
-    setLoading(false);
-    navigate("/new/parsing");
+
+    const center = getDestination(destination);
+    const [places] = await Promise.all([
+      parsePlacesFromText(rawText, center, setParseProgress),
+      demoDelay(),
+    ]);
+    if (places.length === 0) {
+      setLoading(false);
+      setParseProgress(null);
+      alert("장소를 찾지 못했어요. 텍스트를 다시 확인해주세요.");
+      navigate("/new/input");
+      return;
+    }
+    setPlaces(places);
+    setFoundCount(places.length);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    navigate("/new/theme");
   };
 
   return (
@@ -164,11 +190,45 @@ export default function DaysBasecampSetup() {
         />
       </div>
 
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <button onClick={() => navigate(-1)} disabled={loading} className="btn btn-secondary">
+          ← 뒤로
+        </button>
         <button onClick={handleStart} disabled={loading} className="btn btn-primary">
           {loading ? "확인 중..." : "분석 시작"}
         </button>
       </div>
+
+      {loading &&
+        foundCount === null &&
+        createPortal(
+          <LoadingScreen
+            message="장소를 찾고 있어요"
+            subMessage={
+              parseProgress?.phase === "resolving" && parseProgress.total > 0
+                ? `장소 확인 중 (${parseProgress.done}/${parseProgress.total})`
+                : "장소명, 좌표, 가격 수준을 추출하고 있어요"
+            }
+            ticks={["텍스트 조각을 분석하고 있어요", "장소명을 인식하고 있어요", "좌표를 계산하고 있어요", "가격대를 추정하고 있어요"]}
+          />,
+          document.body
+        )}
+
+      {foundCount !== null &&
+        createPortal(
+          <div className="page-fade loading-overlay" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+            <div className="pop-in loading-card" style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 40, marginBottom: 10 }}>🎉</div>
+              <div style={{ fontSize: 19, fontWeight: 800, color: "var(--text)" }}>
+                총 {foundCount}개의 장소를 찾았어요!
+              </div>
+              <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 8 }}>
+                이제 꼭 가고 싶은 곳을 골라볼까요?
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 }

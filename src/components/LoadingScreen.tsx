@@ -16,9 +16,14 @@ export function LoadingScreen({ message, subMessage, ticks }: LoadingScreenProps
   }, [ticks]);
 
   return (
-    <div className="page-fade loading-bg" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", gap: 26 }}>
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: 18, fontWeight: 800, color: "var(--text)" }}>
+    <div className="page-fade loading-overlay" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+      <div className="pop-in loading-card">
+        <div className="dot-bounce" style={{ marginBottom: 14, display: "flex", justifyContent: "center" }}>
+          <span />
+          <span />
+          <span />
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: "var(--text)", whiteSpace: "pre-line" }}>
           {message}
         </div>
         {subMessage && (
@@ -29,12 +34,6 @@ export function LoadingScreen({ message, subMessage, ticks }: LoadingScreenProps
             {ticks[tickIndex]}
           </div>
         )}
-      </div>
-
-      <div className="dot-bounce">
-        <span />
-        <span />
-        <span />
       </div>
     </div>
   );

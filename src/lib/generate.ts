@@ -9,7 +9,13 @@ export const PRICE_LEVEL_JPY: Record<1 | 2 | 3 | 4, number> = {
   4: 12000,
 };
 
-const WALK_SPEED_KMH = 4.5;
+export const WALK_SPEED_KMH = 4.5;
+
+// 사용자가 요청사항에 적은 "도보 N분 거리는 걸어가고 싶어요" 같은 선호를,
+// buildItineraryDays에 넘길 최대 도보 거리(km)로 변환한다.
+export function maxWalkMinutesToKm(minutes: number): number {
+  return (minutes / 60) * WALK_SPEED_KMH;
+}
 // 실제 대중교통은 순수 주행 속도가 아니라 역까지 도보 접근 + 대기 + 환승이 끼어들어 체감 속도가 훨씬 느리다.
 // 짧은 구간일수록 이 고정 오버헤드 비중이 커지므로, 속도만으로 추정하면 크게 과소평가된다.
 const TRANSIT_SPEED_KMH = 15;
@@ -47,14 +53,19 @@ export function computeCentroid(places: { lat: number; lng: number }[]): { lat: 
   return { lat: sum.lat / places.length, lng: sum.lng / places.length };
 }
 
-// 테마별로 장소를 일차에 분배: 카테고리가 일치하는 곳 우선, 남는 곳은 라운드로빈
+// 테마별로 장소를 일차에 분배: 카테고리가 일치하는 곳 우선, 남는 곳은 테마 없는 날에 라운드로빈
+// (테마 없는 날이 하나도 없으면 어쩔 수 없이 테마가 있는 날에도 라운드로빈)
 export function distributePlacesByTheme(places: ParsedPlace[], dayThemes: DayTheme[]): Map<number, ParsedPlace[]> {
   const result = new Map<number, ParsedPlace[]>();
   dayThemes.forEach((dt) => result.set(dt.dayIndex, []));
 
+  const themedDays = dayThemes.filter((dt) => dt.theme !== null);
+  const freeDays = dayThemes.filter((dt) => dt.theme === null);
+  const fallbackDays = freeDays.length > 0 ? freeDays : dayThemes;
+
   const unassigned: ParsedPlace[] = [];
   for (const place of places) {
-    const matchingDay = dayThemes.find((dt) => dt.theme === place.category);
+    const matchingDay = themedDays.find((dt) => dt.theme === place.category);
     if (matchingDay) {
       result.get(matchingDay.dayIndex)!.push(place);
     } else {
@@ -64,7 +75,7 @@ export function distributePlacesByTheme(places: ParsedPlace[], dayThemes: DayThe
 
   let i = 0;
   for (const place of unassigned) {
-    const day = dayThemes[i % dayThemes.length];
+    const day = fallbackDays[i % fallbackDays.length];
     result.get(day.dayIndex)!.push(place);
     i++;
   }
@@ -73,7 +84,7 @@ export function distributePlacesByTheme(places: ParsedPlace[], dayThemes: DayThe
 }
 
 // 하루에 실제로 소화 가능한 장소 수 (경험적 기본값). '꼭 가고 싶어요'로 표시한 곳은 초과해도 유지한다.
-const DEFAULT_DAY_CAPACITY = 4;
+export const DEFAULT_DAY_CAPACITY = 4;
 
 export function capDayPlaces(
   places: ParsedPlace[],
@@ -86,15 +97,22 @@ export function capDayPlaces(
   return { kept: [...mustVisit, ...rest.slice(0, remainingSlots)], overflow: rest.slice(remainingSlots) };
 }
 
-function transportModeFor(km: number, allowCar: boolean): "walk" | "transit" | "car" {
-  if (km < 1) return "walk";
+function transportModeFor(km: number, allowCar: boolean, maxWalkKm: number): "walk" | "transit" | "car" {
+  if (km < maxWalkKm) return "walk";
   if (km < 8 || !allowCar) return "transit";
   return "car";
 }
 
-export function computeLeg(from: { lat: number; lng: number }, to: { lat: number; lng: number }, allowCar: boolean = true) {
+const DEFAULT_MAX_WALK_KM = 1;
+
+export function computeLeg(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM
+) {
   const km = haversineKm(from, to);
-  const mode = transportModeFor(km, allowCar);
+  const mode = transportModeFor(km, allowCar, maxWalkKm);
 
   let travelCost = 0;
   let travelTimeMin: number;
@@ -119,7 +137,8 @@ export function computeLeg(from: { lat: number; lng: number }, to: { lat: number
 export function buildDayRoute(
   places: ParsedPlace[],
   start: { lat: number; lng: number },
-  allowCar: boolean = true
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM
 ): PlaceVisit[] {
   const remaining = [...places];
   const visits: PlaceVisit[] = [];
@@ -137,7 +156,7 @@ export function buildDayRoute(
       }
     });
     const next = remaining.splice(nearestIdx, 1)[0];
-    const leg = computeLeg(current, next, allowCar);
+    const leg = computeLeg(current, next, allowCar, maxWalkKm);
 
     visits.push({
       placeId: next.id,
@@ -157,13 +176,14 @@ export function computeReturnLeg(
   visits: PlaceVisit[],
   places: ParsedPlace[],
   start: { lat: number; lng: number },
-  allowCar: boolean = true
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM
 ): ReturnLeg | null {
   if (visits.length === 0) return null;
   const lastVisit = visits[visits.length - 1];
   const lastPlace = places.find((p) => p.id === lastVisit.placeId);
   if (!lastPlace) return null;
-  return computeLeg(lastPlace, start, allowCar);
+  return computeLeg(lastPlace, start, allowCar, maxWalkKm);
 }
 
 // 사용자가 드래그로 순서를 바꿨을 때, 고정된 순서를 그대로 두고 이동시간/비용만 재계산
@@ -171,12 +191,13 @@ export function recomputeVisitsForOrder(
   orderedPlaceIds: string[],
   places: ParsedPlace[],
   start: { lat: number; lng: number },
-  allowCar: boolean = true
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM
 ): PlaceVisit[] {
   let current = start;
   return orderedPlaceIds.map((placeId, idx) => {
     const place = places.find((p) => p.id === placeId)!;
-    const leg = computeLeg(current, place, allowCar);
+    const leg = computeLeg(current, place, allowCar, maxWalkKm);
     current = place;
     return { placeId, order: idx, ...leg };
   });
@@ -258,7 +279,8 @@ export function buildItineraryDays(
   dayThemes: DayTheme[],
   basecamp: Basecamp | { lat: number; lng: number },
   dayCapacity: number = DEFAULT_DAY_CAPACITY,
-  allowCar: boolean = true
+  allowCar: boolean = true,
+  maxWalkKm: number = DEFAULT_MAX_WALK_KM
 ): { itineraryDays: ItineraryDay[]; excludedPlaces: ParsedPlace[] } {
   const distribution = distributePlacesByTheme(places, dayThemes);
   const excludedPlaces: ParsedPlace[] = [];
@@ -268,8 +290,8 @@ export function buildItineraryDays(
     const { kept, overflow } = capDayPlaces(dayPlaces, dayCapacity);
     excludedPlaces.push(...overflow);
 
-    const orderedByRoute = buildDayRoute(kept, basecamp, allowCar);
-    const returnLeg = computeReturnLeg(orderedByRoute, kept, basecamp, allowCar);
+    const orderedByRoute = buildDayRoute(kept, basecamp, allowCar, maxWalkKm);
+    const returnLeg = computeReturnLeg(orderedByRoute, kept, basecamp, allowCar, maxWalkKm);
     const dailyTransitBudget = computeDailyTransitBudget(orderedByRoute, returnLeg);
     return {
       dayIndex: dt.dayIndex,
@@ -328,7 +350,7 @@ export function computeDayTimeline(
   places: ParsedPlace[],
   returnLeg: ReturnLeg | null,
   startTime: string = DEFAULT_DAY_START_TIME
-): { stops: DayTimelineStop[]; endTime: string } {
+): { stops: DayTimelineStop[]; endTime: string; endMinutes: number } {
   let cursor = timeToMinutes(startTime);
   const stops = visits.map((visit) => {
     cursor += visit.travelTimeMin;
@@ -338,5 +360,7 @@ export function computeDayTimeline(
     return { placeId: visit.placeId, arrival: minutesToTime(arrival), departure: minutesToTime(cursor) };
   });
   if (returnLeg) cursor += returnLeg.travelTimeMin;
-  return { stops, endTime: minutesToTime(cursor) };
+  // endTime은 자정을 넘기면 "24:10" 대신 "00:10"으로 감싸서 보여주는 표시용 값이라,
+  // 목표 귀가 시간 초과 여부는 감싸지 않은 endMinutes(자정 넘김 반영)로 판단해야 한다.
+  return { stops, endTime: minutesToTime(cursor), endMinutes: cursor };
 }

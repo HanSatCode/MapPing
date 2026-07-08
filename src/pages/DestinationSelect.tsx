@@ -110,7 +110,10 @@ export default function DestinationSelect() {
         좌우로 넘기거나 눌러서 선택해주세요
       </p>
 
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <button onClick={() => navigate(-1)} className="btn btn-secondary">
+          ← 뒤로
+        </button>
         <button onClick={() => navigate("/new/input")} className="btn btn-primary">
           다음
         </button>

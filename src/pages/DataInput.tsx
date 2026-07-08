@@ -36,7 +36,10 @@ export default function DataInput() {
           border: "1px solid var(--border)",
         }}
       />
-      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
+        <button onClick={() => navigate(-1)} className="btn btn-secondary">
+          ← 뒤로
+        </button>
         <button onClick={handleNext} className="btn btn-primary">
           다음
         </button>
